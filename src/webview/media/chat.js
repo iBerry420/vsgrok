@@ -1,0 +1,1109 @@
+/* global acquireVsCodeApi */
+(function () {
+  'use strict';
+  const vscode = acquireVsCodeApi();
+  const $ = (id) => document.getElementById(id);
+
+  let state = {
+    sessions: [],
+    messages: [],
+    models: [],
+    notes: [],
+    selectedModel: 'gb:grok-4.5',
+    sessionId: null,
+    sessionTitle: 'New Chat',
+    bridgeConnected: false,
+    bridgeRunning: false,
+    streaming: false,
+    stream: null,
+    showThinking: true,
+    showTools: true,
+    enterToSend: false,
+    useHistory: true,
+    usage: null,
+    health: null,
+  };
+  let lastAssistantMarkdown = '';
+  let contextOn = true;
+  /** When true, keep pin-to-bottom on new content. */
+  let stickToBottom = true;
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function formatElapsed(ms) {
+    const s = Math.max(0, Math.floor((ms || 0) / 1000));
+    return s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  }
+
+  function formatUsagePercent(pct) {
+    const n = Number(pct) || 0;
+    return n % 1 === 0 ? String(n) : n.toFixed(1);
+  }
+  function formatUsagePercentLabel(pct) {
+    return formatUsagePercent(pct) + '%';
+  }
+  function usageLevelClass(pct) {
+    if (pct >= 90) return 'sc-usage-crit';
+    if (pct >= 70) return 'sc-usage-warn';
+    return '';
+  }
+  function usageProductName(raw) {
+    const s = String(raw || '');
+    if (/GrokBuild/i.test(s) || /build/i.test(s)) return 'Build';
+    if (/GrokChat|Chat/i.test(s)) return 'Chat';
+    if (/Imagine/i.test(s)) return 'Imagine';
+    return s || 'Product';
+  }
+  function formatUsageReset(iso, short) {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return String(iso);
+      const opts = short
+        ? { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+        : { dateStyle: 'medium', timeStyle: 'short' };
+      return 'Resets ' + d.toLocaleString(undefined, opts);
+    } catch {
+      return String(iso);
+    }
+  }
+
+  /** Pretty-print JSON-looking strings. */
+  function prettifyJson(s) {
+    const t = String(s == null ? '' : s).trim();
+    if (!t) return String(s == null ? '' : s);
+    try {
+      if (
+        (t.startsWith('{') && t.endsWith('}')) ||
+        (t.startsWith('[') && t.endsWith(']'))
+      ) {
+        return JSON.stringify(JSON.parse(t), null, 2);
+      }
+    } catch {
+      /* not pure json */
+    }
+    // quoted JSON string
+    if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+      try {
+        const inner = JSON.parse(t.startsWith("'") ? '"' + t.slice(1, -1).replace(/"/g, '\\"') + '"' : t);
+        if (typeof inner === 'string') return prettifyJson(inner);
+        return JSON.stringify(inner, null, 2);
+      } catch {
+        /* ignore */
+      }
+    }
+    return String(s == null ? '' : s);
+  }
+
+  function renderDiffBody(body) {
+    return String(body || '')
+      .split('\n')
+      .map((line) => {
+        if (line.startsWith('+++') || line.startsWith('---')) {
+          return '<span class="sc-diff-meta">' + esc(line) + '</span>';
+        }
+        if (line.startsWith('@@')) {
+          return '<span class="sc-diff-hunk">' + esc(line) + '</span>';
+        }
+        if (line.startsWith('+')) {
+          return '<span class="sc-diff-add">' + esc(line) + '</span>';
+        }
+        if (line.startsWith('-')) {
+          return '<span class="sc-diff-del">' + esc(line) + '</span>';
+        }
+        return esc(line);
+      })
+      .join('\n');
+  }
+
+  function looksLikeUnifiedDiff(body) {
+    const s = String(body || '');
+    return (
+      /^diff --git /m.test(s) ||
+      /^@@ -\d/m.test(s) ||
+      (/^[\+\-](?![\+\-]{2})/m.test(s) && /^[\+\-](?![\+\-]{2})/m.test(s.replace(/^[\+\-].*$/m, '')))
+    );
+  }
+
+  function renderCodeFence(info, body) {
+    const infoTrim = (info || '').trim();
+    const lang = (infoTrim.split(/\s+/)[0] || 'text').toLowerCase();
+    const pathHint = infoTrim.includes(' ')
+      ? infoTrim.split(/\s+/).slice(1).join(' ')
+      : /[:/]/.test(infoTrim) || /\.\w+$/.test(infoTrim)
+        ? infoTrim
+        : '';
+    const isDiff =
+      lang === 'diff' ||
+      lang === 'patch' ||
+      lang === 'udiff' ||
+      looksLikeUnifiedDiff(body);
+    let codeBody;
+    const raw = body.replace(/\n$/, '');
+    if (isDiff) codeBody = renderDiffBody(raw);
+    else if (lang === 'json' || lang === 'jsonc') codeBody = esc(prettifyJson(raw));
+    else codeBody = esc(prettifyJson(raw));
+    return (
+      '<div class="sc-code-block' +
+      (isDiff ? ' sc-diff-block' : '') +
+      '"><div class="sc-code-header"><span>' +
+      esc(pathHint || lang) +
+      '</span><span>' +
+      (pathHint
+        ? '<button type="button" data-apply-path="' + esc(pathHint) + '">Apply</button>'
+        : '') +
+      '<button type="button" data-copy="1">Copy</button></span></div><pre><code class="' +
+      (isDiff ? 'sc-diff-code' : '') +
+      '">' +
+      codeBody +
+      '</code></pre></div>'
+    );
+  }
+
+  function inlineFormat(s) {
+    let t = esc(s);
+    // links [text](url)
+    t = t.replace(
+      /\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+      '<a href="$2" data-ext="1" class="sc-link">$1</a>'
+    );
+    // autolink bare URLs (avoid already-linked)
+    t = t.replace(
+      /(^|[\s(])(https?:\/\/[^\s<]+[^\s<.,;:!?)\]])/g,
+      '$1<a href="$2" data-ext="1" class="sc-link">$2</a>'
+    );
+    // bold / italic / code (order matters)
+    t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+    t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    t = t.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    t = t.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>');
+    t = t.replace(/(?<!_)_([^_\n]+)_(?!_)/g, '<em>$1</em>');
+    t = t.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    return t;
+  }
+
+  /**
+   * Lightweight markdown: fences, headings, lists, quotes, hr, paragraphs, links.
+   * Used for assistant text and thinking blocks.
+   */
+  function renderMarkdown(src) {
+    if (!src) return '';
+    let text = String(src).replace(/\r\n/g, '\n');
+    const blocks = [];
+    // fenced code
+    text = text.replace(/```([^\n`]*)\n([\s\S]*?)```/g, (_, info, body) => {
+      const i = blocks.length;
+      blocks.push(renderCodeFence(info, body));
+      return '\n\n\u0000BLOCK' + i + '\u0000\n\n';
+    });
+    // also ```inline fence without trailing newline edge case
+    text = text.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (m, info, body) => {
+      if (m.includes('\u0000BLOCK')) return m;
+      const i = blocks.length;
+      blocks.push(renderCodeFence(info, body));
+      return '\n\n\u0000BLOCK' + i + '\u0000\n\n';
+    });
+
+    const lines = text.split('\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      const trim = line.trim();
+
+      if (!trim) {
+        i++;
+        continue;
+      }
+
+      // restored code block token
+      const bm = trim.match(/^\u0000BLOCK(\d+)\u0000$/);
+      if (bm) {
+        out.push(blocks[Number(bm[1])] || '');
+        i++;
+        continue;
+      }
+
+      // headings
+      const hm = trim.match(/^(#{1,6})\s+(.+)$/);
+      if (hm) {
+        const level = hm[1].length;
+        out.push('<h' + level + ' class="sc-h">' + inlineFormat(hm[2]) + '</h' + level + '>');
+        i++;
+        continue;
+      }
+
+      // hr
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(trim)) {
+        out.push('<hr class="sc-hr"/>');
+        i++;
+        continue;
+      }
+
+      // blockquote
+      if (/^>\s?/.test(trim)) {
+        const q = [];
+        while (i < lines.length && /^>\s?/.test(lines[i].trim() || '')) {
+          q.push(lines[i].trim().replace(/^>\s?/, ''));
+          i++;
+        }
+        out.push(
+          '<blockquote class="sc-quote">' +
+            q.map((l) => (l ? '<p>' + inlineFormat(l) + '</p>' : '')).join('') +
+            '</blockquote>'
+        );
+        continue;
+      }
+
+      // unordered list (- * +)
+      if (/^[-*+]\s+/.test(trim)) {
+        const items = [];
+        while (i < lines.length && /^[-*+]\s+/.test((lines[i] || '').trim())) {
+          items.push((lines[i] || '').trim().replace(/^[-*+]\s+/, ''));
+          i++;
+        }
+        out.push(
+          '<ul class="sc-ul">' +
+            items.map((it) => '<li>' + inlineFormat(it) + '</li>').join('') +
+            '</ul>'
+        );
+        continue;
+      }
+
+      // ordered list
+      if (/^\d+[.)]\s+/.test(trim)) {
+        const items = [];
+        while (i < lines.length && /^\d+[.)]\s+/.test((lines[i] || '').trim())) {
+          items.push((lines[i] || '').trim().replace(/^\d+[.)]\s+/, ''));
+          i++;
+        }
+        out.push(
+          '<ol class="sc-ol">' +
+            items.map((it) => '<li>' + inlineFormat(it) + '</li>').join('') +
+            '</ol>'
+        );
+        continue;
+      }
+
+      // paragraph (consume until blank)
+      const para = [];
+      while (i < lines.length && lines[i].trim()) {
+        const t = lines[i].trim();
+        if (
+          /^\u0000BLOCK\d+\u0000$/.test(t) ||
+          /^(#{1,6})\s+/.test(t) ||
+          /^[-*+]\s+/.test(t) ||
+          /^\d+[.)]\s+/.test(t) ||
+          /^>\s?/.test(t) ||
+          /^(-{3,}|\*{3,}|_{3,})$/.test(t)
+        ) {
+          break;
+        }
+        para.push(lines[i]);
+        i++;
+      }
+      if (para.length) {
+        out.push('<p>' + inlineFormat(para.join('\n')).replace(/\n/g, '<br/>') + '</p>');
+      } else {
+        i++;
+      }
+    }
+
+    return out.join('');
+  }
+
+  function renderTimeline(timeline) {
+    let html = '';
+    for (const seg of timeline || []) {
+      if (seg.type === 'thinking' && state.showThinking) {
+        const open = seg.done ? '' : ' open';
+        const label = seg.done ? 'Thoughts' : 'Thinking';
+        html +=
+          '<details class="sc-thinking-block"' +
+          open +
+          '><summary><span class="sc-thinking-label">' +
+          label +
+          '</span></summary><div class="sc-thinking-body sc-md">' +
+          renderMarkdown(seg.content || '') +
+          '</div></details>';
+      } else if (seg.type === 'tool' && state.showTools) {
+        const done = seg.success != null;
+        const ok = done && seg.success !== false;
+        const cls =
+          'sc-tool-card' + (done ? (ok ? ' ok' : ' fail') : ' running');
+        const detail = prettifyJson(seg.detail || '');
+        const info = prettifyJson(seg.info || '');
+        const title =
+          '⚙ ' +
+          esc(seg.tool || 'tool') +
+          (done ? (ok ? ' · ok' : ' · failed') : ' · running');
+        html +=
+          '<details class="' +
+          cls +
+          '"' +
+          (done ? '' : ' open') +
+          '><summary>' +
+          title +
+          '</summary><div class="sc-tool-body">';
+        if (detail) {
+          html +=
+            '<div class="sc-tool-label">Input</div><pre class="sc-tool-pre">' +
+            esc(detail) +
+            '</pre>';
+        }
+        if (info) {
+          html +=
+            '<div class="sc-tool-label">Result</div><pre class="sc-tool-pre">' +
+            esc(info) +
+            '</pre>';
+        }
+        if (!detail && !info) {
+          html += '<div class="sc-tool-empty">No payload</div>';
+        }
+        html += '</div></details>';
+      } else if (seg.type === 'media' && seg.url) {
+        html +=
+          '<div class="sc-tool-card sc-media-card">🖼 ' +
+          esc(seg.name || seg.kind || 'media') +
+          ' <a href="' +
+          esc(seg.url) +
+          '" data-ext="1">open</a></div>';
+      } else if (seg.type === 'text' && seg.content) {
+        html += '<div class="sc-md">' + renderMarkdown(seg.content) + '</div>';
+      }
+    }
+    return html;
+  }
+
+  function toast(level, text) {
+    const el = document.createElement('div');
+    el.className = 'sc-toast ' + (level || 'info');
+    el.textContent = text;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 3500);
+  }
+
+  function closePopovers() {
+    document.querySelectorAll('.sc-wrap.open').forEach((w) => w.classList.remove('open'));
+  }
+  function toggleWrap(id) {
+    const w = $(id);
+    if (!w) return;
+    const open = w.classList.contains('open');
+    closePopovers();
+    if (!open) w.classList.add('open');
+  }
+
+  function scrollEl() {
+    return $('scroll');
+  }
+
+  function isNearBottom(el, px) {
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < (px || 48);
+  }
+
+  function maybeScrollToBottom(force) {
+    const el = scrollEl();
+    if (!el) return;
+    if (force || stickToBottom) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }
+
+  function renderUsage() {
+    const chip = $('usageChip');
+    const detail = $('usageDetail');
+    const body = $('usageBody');
+    const tierEl = $('usageTier');
+    const data = state.usage;
+
+    if (!data || data.ok === false) {
+      if (chip) {
+        chip.textContent = 'Usage —';
+        chip.classList.remove('sc-usage-warn', 'sc-usage-crit');
+        chip.title = (data && (data.message || data.error)) || 'Usage unavailable';
+      }
+      if (body) {
+        body.innerHTML =
+          '<div class="sc-usage-error">' +
+          esc((data && (data.message || data.error)) || 'Sign in to Grok Build to load usage.') +
+          '</div>';
+      }
+      if (detail) detail.classList.remove('sc-usage-warn', 'sc-usage-crit');
+      return;
+    }
+
+    const pct = Number(data.usage_percent) || 0;
+    const remaining = Number(data.remaining_percent);
+    const rem = Number.isFinite(remaining) ? remaining : Math.max(0, 100 - pct);
+    const level = usageLevelClass(pct);
+
+    if (chip) {
+      chip.textContent = formatUsagePercentLabel(pct) + ' used';
+      chip.classList.toggle('sc-usage-warn', pct >= 70 && pct < 90);
+      chip.classList.toggle('sc-usage-crit', pct >= 90);
+      chip.title = formatUsagePercentLabel(rem) + ' left · tap to open settings';
+    }
+
+    if (tierEl) {
+      const tier = data.subscription_tier;
+      if (tier) {
+        tierEl.hidden = false;
+        tierEl.textContent = String(tier);
+      } else {
+        tierEl.hidden = true;
+      }
+    }
+
+    if (detail) {
+      detail.classList.toggle('sc-usage-warn', level === 'sc-usage-warn');
+      detail.classList.toggle('sc-usage-crit', level === 'sc-usage-crit');
+    }
+
+    let productsHtml = '';
+    const products = (data.products || []).filter(
+      (p) => p.usage_percent != null && Number(p.usage_percent) > 0
+    );
+    if (products.length) {
+      productsHtml =
+        '<div class="sc-usage-products"><div class="sc-usage-products-label">By product</div>' +
+        products
+          .map((p) => {
+            const pPct = Number(p.usage_percent) || 0;
+            const pLevel = usageLevelClass(pPct);
+            const w = Math.min(100, Math.max(0, pPct));
+            return (
+              '<div class="sc-usage-product ' +
+              pLevel +
+              '"><div class="sc-usage-product-row">' +
+              '<span class="sc-usage-product-name">' +
+              esc(usageProductName(p.product)) +
+              '</span><span class="sc-usage-product-pct">' +
+              esc(formatUsagePercentLabel(pPct)) +
+              '</span></div><div class="sc-usage-product-bar"><span style="width:' +
+              w +
+              '%"></span></div></div>'
+            );
+          })
+          .join('') +
+        '</div>';
+    }
+
+    if (body) {
+      body.innerHTML =
+        '<div class="sc-usage-hero"><div class="sc-usage-hero-left">' +
+        '<span class="sc-usage-pct">' +
+        esc(formatUsagePercent(pct)) +
+        '</span><span class="sc-usage-pct-unit">%</span>' +
+        '<span class="sc-usage-pct-label">used</span></div>' +
+        '<div class="sc-usage-left">' +
+        esc(formatUsagePercentLabel(rem)) +
+        ' left</div></div>' +
+        '<div class="sc-usage-bar ' +
+        level +
+        '"><span style="width:' +
+        Math.min(100, Math.max(0, pct)) +
+        '%"></span></div>' +
+        '<div class="sc-usage-reset">' +
+        esc(formatUsageReset(data.reset_at, true)) +
+        '</div>' +
+        productsHtml;
+    }
+  }
+
+  function iconCopy() {
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  }
+  function iconHide(active) {
+    return (
+      '<button type="button" data-act="hide" title="' +
+      (active ? 'Include in context' : 'Hide from context') +
+      '" aria-label="Hide from context" class="' +
+      (active ? 'active' : '') +
+      '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>'
+    );
+  }
+  function iconDelete() {
+    return '<button type="button" data-act="delete" title="Delete from chat" aria-label="Delete"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>';
+  }
+  function iconCopyBtn() {
+    return (
+      '<button type="button" data-act="copy" title="Copy" aria-label="Copy">' +
+      iconCopy() +
+      '</button>'
+    );
+  }
+
+  function actionsHtml(m) {
+    const excluded = !!m.excludedFromContext;
+    const hide = iconHide(excluded);
+    // User: delete, hide, copy · AI: copy, hide, delete
+    const buttons =
+      m.role === 'user'
+        ? iconDelete() + hide + iconCopyBtn()
+        : iconCopyBtn() + hide + iconDelete();
+    return (
+      '<div class="sc-msg-actions" data-mid="' +
+      esc(m.id) +
+      '" role="toolbar">' +
+      buttons +
+      '</div>'
+    );
+  }
+
+  function messageHtml(m) {
+    const meta = m.metadata || {};
+    const excluded = !!m.excludedFromContext;
+    const metaLine =
+      m.role === 'assistant'
+        ? esc(meta.model || '') + (meta.duration ? ' · ' + formatElapsed(meta.duration) : '')
+        : '';
+    let body;
+    if (m.role === 'assistant' && meta.timeline && meta.timeline.length) {
+      body = renderTimeline(meta.timeline);
+    } else if (m.role === 'assistant') {
+      body = '<div class="sc-md">' + renderMarkdown(m.content || '') + '</div>';
+    } else {
+      body = '<div class="sc-md">' + renderMarkdown(m.content || '') + '</div>';
+    }
+    if (m.role === 'assistant' && m.content) lastAssistantMarkdown = m.content;
+    // Action bar is a sibling of the bubble so it can displace layout (not overlay)
+    return (
+      '<div class="sc-msg ' +
+      esc(m.role) +
+      (excluded ? ' excluded' : '') +
+      '" data-mid="' +
+      esc(m.id) +
+      '">' +
+      actionsHtml(m) +
+      '<div class="sc-msg-bubble">' +
+      (metaLine ? '<div class="sc-msg-meta">' + metaLine + '</div>' : '') +
+      body +
+      '</div></div>'
+    );
+  }
+
+  function renderMessages() {
+    const root = $('messages');
+    if (!root) return;
+    const msgs = state.messages || [];
+    if (!msgs.length && !state.streaming) {
+      root.innerHTML =
+        '<div class="sc-welcome"><h3>VSGrok Chat</h3><p>Grok Build sessions for this workspace. History comes from <code>~/.grok/sessions</code>.</p></div>';
+      return;
+    }
+    let html = '';
+    for (const m of msgs) {
+      // Hide empty streaming assistant stub — live content is in #stream
+      if (m.metadata && m.metadata.streaming && state.streaming) continue;
+      html += messageHtml(m);
+    }
+    root.innerHTML = html;
+    maybeScrollToBottom(false);
+  }
+
+  function renderStream() {
+    const el = $('stream');
+    if (!el) return;
+    if (!state.streaming || !state.stream) {
+      el.innerHTML = '';
+      return;
+    }
+    const s = state.stream;
+    const meta =
+      esc(s.model || '…') +
+      ' · ' +
+      formatElapsed(Date.now() - (s.startTime || Date.now()));
+    let body = renderTimeline(s.timeline || []);
+    if (!body && s.fullText) body = '<div class="sc-md">' + renderMarkdown(s.fullText) + '</div>';
+    if (!body) body = '<div class="sc-md sc-muted-line">Thinking…</div>';
+    el.innerHTML =
+      '<div class="sc-msg assistant streaming" data-mid="__stream__">' +
+      '<div class="sc-msg-bubble"><div class="sc-msg-meta">' +
+      meta +
+      '</div>' +
+      body +
+      '</div></div>';
+    if (s.fullText) lastAssistantMarkdown = s.fullText;
+    maybeScrollToBottom(false);
+  }
+
+  function renderSessions() {
+    const list = $('sessionList');
+    if (!list) return;
+    const sessions = state.sessions || [];
+    list.innerHTML = sessions
+      .map((s) => {
+        const active = s.id === state.sessionId ? ' active' : '';
+        return (
+          '<button type="button" class="sc-session-item' +
+          active +
+          '" data-sid="' +
+          esc(s.id) +
+          '">' +
+          esc(s.title || 'Chat') +
+          '<span class="sc-session-meta">' +
+          esc(String(s.id).slice(0, 8)) +
+          (s.messageCount ? ' · ' + s.messageCount + ' msgs' : '') +
+          '</span></button>'
+        );
+      })
+      .join('') || '<div class="sc-session-meta" style="padding:8px">No sessions yet</div>';
+  }
+
+  function renderModels() {
+    const sel = $('modelSelect');
+    if (!sel) return;
+    sel.innerHTML = (state.models || [])
+      .map(
+        (m) =>
+          '<option value="' +
+          esc(m.id) +
+          '"' +
+          (m.id === state.selectedModel ? ' selected' : '') +
+          '>' +
+          esc(m.name || m.id) +
+          '</option>'
+      )
+      .join('');
+  }
+
+  function renderNotes() {
+    const list = $('notesList');
+    const badge = $('notesBadge');
+    const notes = state.notes || [];
+    const enabled = notes.filter((n) => n.enabled !== false).length;
+    if (badge) {
+      if (enabled) {
+        badge.classList.remove('hidden');
+        badge.textContent = String(enabled);
+      } else badge.classList.add('hidden');
+    }
+    if (!list) return;
+    list.innerHTML = notes
+      .map(
+        (n, i) =>
+          '<div class="sc-note-row"><input type="checkbox" data-note-i="' +
+          i +
+          '" ' +
+          (n.enabled !== false ? 'checked' : '') +
+          '/><span>' +
+          esc(n.text) +
+          '</span><button type="button" data-note-del="' +
+          i +
+          '">✕</button></div>'
+      )
+      .join('');
+  }
+
+  function renderStatus() {
+    const dot = $('statusDot');
+    if (dot) {
+      dot.classList.remove('connected', 'busy');
+      if (state.streaming) dot.classList.add('busy');
+      else if (state.bridgeConnected) dot.classList.add('connected');
+    }
+    const warn = $('bridgeWarn');
+    if (warn) {
+      if (!state.bridgeRunning && !state.bridgeConnected) warn.classList.remove('hidden');
+      else warn.classList.add('hidden');
+    }
+    const title = $('topbarTitle');
+    if (title) title.textContent = state.sessionTitle || 'New Chat';
+
+    const banner = $('loginBanner');
+    const auth = state.health && state.health.grok_auth;
+    if (banner) {
+      if (auth && auth.ok === false) {
+        banner.classList.remove('hidden');
+        banner.innerHTML =
+          'Grok not signed in. <button type="button" id="btnLoginBanner">Login</button>';
+        const b = $('btnLoginBanner');
+        if (b) b.onclick = () => vscode.postMessage({ type: 'loginGrok' });
+      } else banner.classList.add('hidden');
+    }
+
+    const root = document.getElementById('app');
+    if (root) {
+      root.classList.toggle('sc-hide-tools', !state.showTools);
+      root.classList.toggle('sc-hide-thoughts', !state.showThinking);
+    }
+
+    const send = $('btnSend');
+    const stop = $('btnStop');
+    const prompt = $('prompt');
+    if (send) {
+      send.disabled = !!state.streaming || !(prompt && prompt.value.trim());
+      send.classList.toggle('hidden', !!state.streaming);
+    }
+    if (stop) {
+      stop.classList.toggle('hidden', !state.streaming);
+    }
+
+    const set = (id, v) => {
+      const el = $(id);
+      if (el) el.checked = !!v;
+    };
+    set('setHistory', state.useHistory);
+    set('setEnterNewline', !state.enterToSend);
+    set('setShowTools', state.showTools);
+    set('setShowThoughts', state.showThinking);
+
+    const ctx = $('btnContext');
+    if (ctx) ctx.classList.toggle('active', contextOn);
+  }
+
+  function applyState(payload) {
+    const wasStreaming = state.streaming;
+    state = { ...state, ...payload };
+    renderSessions();
+    renderModels();
+    renderNotes();
+    renderMessages();
+    renderStream();
+    renderUsage();
+    renderStatus();
+    // After first paint of a new turn, stick to bottom
+    if (state.streaming && !wasStreaming) {
+      stickToBottom = true;
+      maybeScrollToBottom(true);
+    }
+  }
+
+  /**
+   * Show slim icon bar under the bubble (in-flow).
+   * Only adjusts scroll on first open — never while moving within the same bubble
+   * (crossing thoughts/tools was resetting scroll).
+   */
+  function placeActionsBar(msgEl, opts) {
+    if (!msgEl) return;
+    const bar = msgEl.querySelector('.sc-msg-actions');
+    const sc = scrollEl();
+    if (!bar || !sc) return;
+
+    const alreadyOpen = msgEl.classList.contains('actions-open');
+    bar.classList.add('visible');
+    msgEl.classList.add('actions-open');
+
+    // Skip scroll nudge if already open or user has scrolled away from bottom
+    if (alreadyOpen || opts?.skipScroll) return;
+    if (!stickToBottom) return;
+
+    requestAnimationFrame(() => {
+      // Bail if user scrolled away during the frame
+      if (!stickToBottom) return;
+      const scRect = sc.getBoundingClientRect();
+      const barRect = bar.getBoundingClientRect();
+      const pad = 8;
+      if (barRect.bottom > scRect.bottom - pad) {
+        sc.scrollTop += barRect.bottom - scRect.bottom + pad + 4;
+      }
+    });
+  }
+
+  function hideAllActionBars() {
+    document.querySelectorAll('.sc-msg.actions-open').forEach((el) => {
+      el.classList.remove('actions-open');
+    });
+    document.querySelectorAll('.sc-msg-actions.visible').forEach((el) => {
+      el.classList.remove('visible');
+    });
+  }
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data || {};
+    if (msg.type === 'state') applyState(msg.payload || {});
+    else if (msg.type === 'stream') {
+      state.streaming = !!(msg.payload && msg.payload.streaming && !msg.payload.done);
+      state.stream = msg.payload;
+      if (msg.payload && msg.payload.done) state.streaming = false;
+      renderStream();
+      renderStatus();
+    } else if (msg.type === 'toast') toast(msg.level, msg.text);
+  });
+
+  function on(id, evt, fn) {
+    const el = $(id);
+    if (!el) {
+      console.warn('[vsgrok] missing element #' + id);
+      return;
+    }
+    el.addEventListener(evt, fn);
+  }
+
+  function autosizePrompt() {
+    const el = $('prompt');
+    if (!el) return;
+    el.style.height = 'auto';
+    const cs = window.getComputedStyle(el);
+    const maxPx = parseFloat(cs.maxHeight) || 320;
+    const next = Math.min(el.scrollHeight, maxPx);
+    el.style.height = Math.max(next, 48) + 'px';
+    el.style.overflowY = el.scrollHeight > maxPx + 1 ? 'auto' : 'hidden';
+  }
+
+  // Scroll lock: unlock when user scrolls up; re-lock at bottom
+  on('scroll', 'scroll', () => {
+    const el = scrollEl();
+    if (!el) return;
+    stickToBottom = isNearBottom(el, 64);
+  });
+
+  on('btnSend', 'click', () => {
+    const text = ($('prompt') && $('prompt').value) || '';
+    if (!text.trim() || state.streaming) return;
+    const model = ($('modelSelect') && $('modelSelect').value) || state.selectedModel;
+
+    // Optimistic user bubble before host responds
+    const optimistic = {
+      id: 'local-' + Date.now(),
+      role: 'user',
+      content: text.trim(),
+      createdAt: Date.now(),
+    };
+    state.messages = [...(state.messages || []), optimistic];
+    state.streaming = true;
+    stickToBottom = true;
+    renderMessages();
+    renderStatus();
+    maybeScrollToBottom(true);
+
+    vscode.postMessage({ type: 'send', text, model });
+    if ($('prompt')) {
+      $('prompt').value = '';
+      autosizePrompt();
+    }
+  });
+
+  on('btnStop', 'click', () => {
+    vscode.postMessage({ type: 'stop' });
+  });
+
+  on('prompt', 'input', () => {
+    autosizePrompt();
+    renderStatus();
+  });
+  on('prompt', 'keydown', (e) => {
+    const enterSends = state.enterToSend;
+    if (enterSends && e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const b = $('btnSend');
+      if (b) b.click();
+    } else if (!enterSends && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      const b = $('btnSend');
+      if (b) b.click();
+    } else {
+      requestAnimationFrame(autosizePrompt);
+    }
+  });
+  requestAnimationFrame(autosizePrompt);
+
+  on('btnHistory', 'click', () => toggleWrap('historyWrap'));
+  on('btnNotes', 'click', () => toggleWrap('notesWrap'));
+  on('btnSettings', 'click', () => toggleWrap('settingsWrap'));
+  on('usageChip', 'click', () => {
+    closePopovers();
+    const w = $('settingsWrap');
+    if (w) w.classList.add('open');
+    vscode.postMessage({ type: 'refreshUsage' });
+  });
+  on('usageRefresh', 'click', () => vscode.postMessage({ type: 'refreshUsage' }));
+  on('btnNew', 'click', () => {
+    closePopovers();
+    vscode.postMessage({ type: 'newSession' });
+  });
+  on('btnContext', 'click', () => {
+    contextOn = !contextOn;
+    renderStatus();
+    vscode.postMessage({ type: 'setSetting', key: 'includeSelection', value: contextOn });
+  });
+  on('btnLogin', 'click', () => vscode.postMessage({ type: 'loginGrok' }));
+  on('btnBridge', 'click', () => vscode.postMessage({ type: 'startBridge' }));
+  on('btnApply', 'click', () =>
+    vscode.postMessage({ type: 'applyMarkdown', markdown: lastAssistantMarkdown })
+  );
+
+  on('sessionList', 'click', (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest('[data-sid]') : null;
+    if (!btn) return;
+    closePopovers();
+    vscode.postMessage({ type: 'switchSession', id: btn.getAttribute('data-sid') });
+  });
+
+  on('modelSelect', 'change', () =>
+    vscode.postMessage({ type: 'setModel', model: $('modelSelect').value })
+  );
+
+  function bindSetting(id, key, invert) {
+    on(id, 'change', () => {
+      let v = $(id).checked;
+      if (invert) v = !v;
+      vscode.postMessage({ type: 'setSetting', key, value: v });
+    });
+  }
+  bindSetting('setHistory', 'useHistory');
+  bindSetting('setEnterNewline', 'enterToSend', true);
+  bindSetting('setShowTools', 'showTools');
+  bindSetting('setShowThoughts', 'showThinking');
+
+  on('notesAdd', 'click', () => {
+    const text = (($('notesInput') && $('notesInput').value) || '').trim();
+    if (!text) return;
+    const notes = [...(state.notes || []), { id: String(Date.now()), text, enabled: true }];
+    if ($('notesInput')) $('notesInput').value = '';
+    vscode.postMessage({ type: 'saveNotes', notes });
+  });
+  on('notesList', 'change', (e) => {
+    const t = e.target;
+    if (t && t.matches && t.matches('input[data-note-i]')) {
+      const i = Number(t.getAttribute('data-note-i'));
+      const notes = (state.notes || []).map((n, idx) =>
+        idx === i ? { ...n, enabled: t.checked } : n
+      );
+      vscode.postMessage({ type: 'saveNotes', notes });
+    }
+  });
+  on('notesList', 'click', (e) => {
+    const t = e.target;
+    if (t && t.matches && t.matches('[data-note-del]')) {
+      const i = Number(t.getAttribute('data-note-del'));
+      const notes = (state.notes || []).filter((_, idx) => idx !== i);
+      vscode.postMessage({ type: 'saveNotes', notes });
+    }
+  });
+
+  // Slim icon bar always under the bubble; leave delay to reach buttons.
+  // mouseenter/mouseleave on the message (not mouseover on every child) so
+  // crossing thoughts/tools does not re-fire open/scroll.
+  let actionsLeaveTimer = null;
+  let activeActionsMsg = null;
+
+  function openActionsFor(msg) {
+    if (!msg || msg.getAttribute('data-mid') === '__stream__') return;
+    if (actionsLeaveTimer) {
+      clearTimeout(actionsLeaveTimer);
+      actionsLeaveTimer = null;
+    }
+    if (activeActionsMsg === msg) {
+      // Already open for this bubble — do nothing (preserves scroll)
+      return;
+    }
+    if (activeActionsMsg && activeActionsMsg !== msg) {
+      hideAllActionBars();
+    }
+    activeActionsMsg = msg;
+    placeActionsBar(msg);
+  }
+
+  function scheduleCloseActions(msg) {
+    if (actionsLeaveTimer) clearTimeout(actionsLeaveTimer);
+    actionsLeaveTimer = setTimeout(() => {
+      if (activeActionsMsg === msg) {
+        hideAllActionBars();
+        activeActionsMsg = null;
+      }
+      actionsLeaveTimer = null;
+    }, 220);
+  }
+
+  document.addEventListener(
+    'mouseover',
+    (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLElement)) return;
+      const msg = t.closest('.sc-msg[data-mid]');
+      if (!msg || msg.getAttribute('data-mid') === '__stream__') return;
+      // Ignore transitions between descendants of the same message
+      const from = e.relatedTarget;
+      if (from instanceof HTMLElement && msg.contains(from)) return;
+      openActionsFor(msg);
+    },
+    true
+  );
+  document.addEventListener(
+    'mouseout',
+    (e) => {
+      const t = e.target;
+      const related = e.relatedTarget;
+      if (!(t instanceof HTMLElement)) return;
+      const msg = t.closest('.sc-msg');
+      if (!msg || msg !== activeActionsMsg) return;
+      // Still inside this message (e.g. thought → tool) — keep open, no scroll work
+      if (related instanceof HTMLElement && msg.contains(related)) return;
+      scheduleCloseActions(msg);
+    },
+    true
+  );
+
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof HTMLElement)) return;
+    if (!t.closest('.sc-wrap')) closePopovers();
+
+    const actBtn = t.closest('.sc-msg-actions [data-act]');
+    if (actBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const bar = actBtn.closest('.sc-msg-actions');
+      const id = bar && bar.getAttribute('data-mid');
+      const act = actBtn.getAttribute('data-act');
+      const msg = (state.messages || []).find((m) => m.id === id);
+      if (act === 'copy') {
+        const text = (msg && msg.content) || '';
+        navigator.clipboard.writeText(text).then(
+          () => toast('info', 'Copied'),
+          () => toast('error', 'Copy failed')
+        );
+      } else if (act === 'hide' && id) {
+        vscode.postMessage({
+          type: 'excludeMessage',
+          id,
+          excluded: !(msg && msg.excludedFromContext),
+        });
+      } else if (act === 'delete' && id) {
+        vscode.postMessage({ type: 'deleteMessage', id });
+      }
+      return;
+    }
+
+    if (t.closest('a[data-ext], a.sc-link')) {
+      const a = t.closest('a');
+      if (a && a.getAttribute('href')) {
+        e.preventDefault();
+        vscode.postMessage({ type: 'openExternal', url: a.getAttribute('href') });
+      }
+      return;
+    }
+    if (t.matches('button[data-copy]')) {
+      const pre = t.closest('.sc-code-block')?.querySelector('code');
+      if (pre) {
+        navigator.clipboard.writeText(pre.textContent || '');
+        toast('info', 'Copied');
+      }
+    }
+    if (t.matches('button[data-apply-path]')) {
+      const pre = t.closest('.sc-code-block')?.querySelector('code');
+      const p = t.getAttribute('data-apply-path');
+      if (pre && p) {
+        vscode.postMessage({
+          type: 'applyMarkdown',
+          markdown: '```' + p + '\n' + (pre.textContent || '') + '\n```',
+        });
+      }
+    }
+  });
+
+  setInterval(() => {
+    if (state.streaming) renderStream();
+  }, 1000);
+
+  vscode.postMessage({ type: 'ready' });
+})();

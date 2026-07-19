@@ -1,0 +1,18 @@
+.vscode/**
+.vscode-test/**
+src/**
+scripts/**
+node_modules/**
+dist-test/**
+**/*.ts
+**/*.map
+.gitignore
+tsconfig*.json
+# Keep bridge/node_modules so the installed extension can start without a post-install npm.
+# (Only the root extension node_modules is excluded — deps are esbuilt into dist/extension.js.)
+storage/**
+.vsgrok/**
+*.vsix
+**/.git/**
+**/*.log
+dist/**/*.map

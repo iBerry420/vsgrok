@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-test/
+*.vsix
+.vsgrok/
+.storage/
+storage/
+.DS_Store
+.env
+*.tsbuildinfo
+bridge/node_modules/
+.vscode-test/

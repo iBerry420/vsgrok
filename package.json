@@ -1,0 +1,193 @@
+{
+  "name": "vsgrok",
+  "displayName": "VSGrok",
+  "description": "Highly capable Grok Build chat in VS Code — local bridge, streaming tools/thinking, workspace context, and apply diffs.",
+  "version": "0.1.11",
+  "publisher": "iberry420",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iBerry420/vsgrok"
+  },
+  "keywords": [
+    "grok",
+    "grok build",
+    "ai",
+    "chat",
+    "agent"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "vsgrok",
+          "title": "VSGrok",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "vsgrok": [
+        {
+          "type": "webview",
+          "id": "vsgrok.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vsgrok.openChat",
+        "title": "VSGrok: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "vsgrok.newSession",
+        "title": "VSGrok: New Session"
+      },
+      {
+        "command": "vsgrok.startBridge",
+        "title": "VSGrok: Start Bridge"
+      },
+      {
+        "command": "vsgrok.stopBridge",
+        "title": "VSGrok: Stop Bridge"
+      },
+      {
+        "command": "vsgrok.loginGrok",
+        "title": "VSGrok: Login to Grok"
+      },
+      {
+        "command": "vsgrok.addSelection",
+        "title": "VSGrok: Add Selection to Chat"
+      },
+      {
+        "command": "vsgrok.addActiveFile",
+        "title": "VSGrok: Add Active File to Chat"
+      },
+      {
+        "command": "vsgrok.applyLastDiff",
+        "title": "VSGrok: Apply Last Diff"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "vsgrok.addSelection",
+          "when": "editorHasSelection",
+          "group": "vsgrok@1"
+        },
+        {
+          "command": "vsgrok.addActiveFile",
+          "group": "vsgrok@2"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "vsgrok.newSession",
+          "when": "view == vsgrok.chatView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "VSGrok",
+      "properties": {
+        "vsgrok.grokBin": {
+          "type": "string",
+          "default": "grok",
+          "description": "Path to the Grok Build CLI binary (or name on PATH)."
+        },
+        "vsgrok.reasoningEffort": {
+          "type": "string",
+          "default": "high",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Reasoning effort passed to Grok Build."
+        },
+        "vsgrok.defaultModel": {
+          "type": "string",
+          "default": "gb:grok-4.5",
+          "description": "Default model id (gb:…)."
+        },
+        "vsgrok.autoStartBridge": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the local agent bridge when the extension activates."
+        },
+        "vsgrok.bridgePort": {
+          "type": "number",
+          "default": 0,
+          "description": "Bridge listen port (0 = ephemeral)."
+        },
+        "vsgrok.includeSelection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically attach the active editor selection as context."
+        },
+        "vsgrok.maxContextBytes": {
+          "type": "number",
+          "default": 80000,
+          "description": "Max bytes of IDE context injected per turn."
+        },
+        "vsgrok.showThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show thinking/reasoning segments in the chat UI."
+        },
+        "vsgrok.showTools": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show tool call rows in the chat UI."
+        },
+        "vsgrok.enterToSend": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, Enter sends (Shift+Enter for newline). If false, Ctrl/Cmd+Enter sends."
+        },
+        "vsgrok.workspaceDataDir": {
+          "type": "string",
+          "default": ".vsgrok",
+          "description": "Workspace-relative directory for bridge runtime data."
+        },
+        "vsgrok.useHistory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include prior messages as conversation history for the agent."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node scripts/build.js",
+    "watch": "node scripts/build.js --watch",
+    "test": "npm run build:test && node --test 'dist-test/**/*.test.js'",
+    "build:test": "tsc -p tsconfig.test.json",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

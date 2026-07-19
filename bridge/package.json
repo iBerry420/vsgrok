@@ -1,0 +1,14 @@
+{
+  "name": "vsgrok-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local WebSocket agent bridge for VSGrok (GrokifyOS-derived, no MySQL)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0"
+  }
+}
