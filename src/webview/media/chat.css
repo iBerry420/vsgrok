@@ -285,14 +285,22 @@ html, body {
   margin: 0.75rem 0;
 }
 .sc-md a.sc-link,
-.sc-md a[data-ext] {
-  color: var(--sc-accent);
+.sc-md a[data-ext],
+.sc-md a[href],
+a.sc-link,
+a[data-ext] {
+  color: var(--sc-accent) !important;
   text-decoration: underline;
   cursor: pointer;
   word-break: break-all;
+  pointer-events: auto;
+  position: relative;
+  z-index: 2;
 }
-.sc-md a.sc-link:hover {
-  color: #a5f3fc;
+.sc-md a.sc-link:hover,
+.sc-md a[data-ext]:hover,
+a.sc-link:hover {
+  color: #a5f3fc !important;
 }
 .sc-thinking-body.sc-md {
   color: #c4b5fd;

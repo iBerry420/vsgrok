@@ -27,6 +27,10 @@
   let contextOn = true;
   /** When true, keep pin-to-bottom on new content. */
   let stickToBottom = true;
+  /** User-closed collapsibles in the live stream (survive re-renders). */
+  const streamUserClosed = new Set();
+  /** Defer stream HTML rebuild while the user is selecting text. */
+  let streamRenderPending = false;
 
   function esc(s) {
     return String(s == null ? '' : s)
@@ -318,14 +322,34 @@
     return out.join('');
   }
 
-  function renderTimeline(timeline) {
+  function segKey(seg, index) {
+    if (seg.type === 'tool') {
+      return 'tool-' + index + '-' + (seg.tool || 'tool');
+    }
+    if (seg.type === 'thinking') return 'thinking-' + index;
+    if (seg.type === 'media') return 'media-' + index + '-' + (seg.url || '');
+    if (seg.type === 'text') return 'text-' + index;
+    return 'seg-' + index;
+  }
+
+  function renderTimeline(timeline, opts) {
+    const live = !!(opts && opts.live);
     let html = '';
-    for (const seg of timeline || []) {
+    const list = timeline || [];
+    for (let i = 0; i < list.length; i++) {
+      const seg = list[i];
+      const key = segKey(seg, i);
       if (seg.type === 'thinking' && state.showThinking) {
-        const open = seg.done ? '' : ' open';
+        const userClosed = live && streamUserClosed.has(key);
+        // Live: open while thinking unless user closed; finished: closed unless user opened
+        // (user open state tracked as NOT in streamUserClosed + was open — we only track closed)
+        const defaultOpen = !seg.done;
+        const open = !userClosed && defaultOpen ? ' open' : '';
         const label = seg.done ? 'Thoughts' : 'Thinking';
         html +=
-          '<details class="sc-thinking-block"' +
+          '<details class="sc-thinking-block" data-seg="' +
+          esc(key) +
+          '"' +
           open +
           '><summary><span class="sc-thinking-label">' +
           label +
@@ -343,11 +367,16 @@
           '⚙ ' +
           esc(seg.tool || 'tool') +
           (done ? (ok ? ' · ok' : ' · failed') : ' · running');
+        const userClosed = live && streamUserClosed.has(key);
+        const defaultOpen = !done;
+        const open = !userClosed && defaultOpen ? ' open' : '';
         html +=
           '<details class="' +
           cls +
+          '" data-seg="' +
+          esc(key) +
           '"' +
-          (done ? '' : ' open') +
+          open +
           '><summary>' +
           title +
           '</summary><div class="sc-tool-body">';
@@ -369,16 +398,67 @@
         html += '</div></details>';
       } else if (seg.type === 'media' && seg.url) {
         html +=
-          '<div class="sc-tool-card sc-media-card">🖼 ' +
+          '<div class="sc-tool-card sc-media-card" data-seg="' +
+          esc(key) +
+          '">🖼 ' +
           esc(seg.name || seg.kind || 'media') +
           ' <a href="' +
           esc(seg.url) +
-          '" data-ext="1">open</a></div>';
+          '" data-ext="1" class="sc-link">open</a></div>';
       } else if (seg.type === 'text' && seg.content) {
-        html += '<div class="sc-md">' + renderMarkdown(seg.content) + '</div>';
+        html +=
+          '<div class="sc-md" data-seg="' +
+          esc(key) +
+          '">' +
+          renderMarkdown(seg.content) +
+          '</div>';
       }
     }
     return html;
+  }
+
+  function hasSelectionIn(root) {
+    if (!root) return false;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+    let node = sel.anchorNode;
+    if (!node) return false;
+    if (node.nodeType === 3) node = node.parentNode;
+    return !!(node && root.contains(node));
+  }
+
+  function captureOpenSegs(root) {
+    const open = new Set();
+    if (!root) return open;
+    root.querySelectorAll('details[data-seg][open]').forEach((d) => {
+      open.add(d.getAttribute('data-seg'));
+    });
+    return open;
+  }
+
+  function restoreOpenSegs(root, openKeys) {
+    if (!root || !openKeys) return;
+    root.querySelectorAll('details[data-seg]').forEach((d) => {
+      const k = d.getAttribute('data-seg');
+      if (!k) return;
+      // User explicitly closed → force closed
+      if (streamUserClosed.has(k)) {
+        d.removeAttribute('open');
+        return;
+      }
+      // Restore previously open, or keep default from HTML
+      if (openKeys.has(k)) d.setAttribute('open', '');
+    });
+  }
+
+  function updateStreamMetaOnly() {
+    const metaEl = document.querySelector('#stream .sc-msg-meta');
+    if (!metaEl || !state.stream) return;
+    const s = state.stream;
+    metaEl.textContent =
+      (s.model || '…') +
+      ' · ' +
+      formatElapsed(Date.now() - (s.startTime || Date.now()));
   }
 
   function toast(level, text) {
@@ -614,14 +694,28 @@
     if (!el) return;
     if (!state.streaming || !state.stream) {
       el.innerHTML = '';
+      streamUserClosed.clear();
+      streamRenderPending = false;
       return;
     }
+
+    // Don't blow away open details / text selection mid-interaction
+    if (hasSelectionIn(el) || hasSelectionIn(scrollEl())) {
+      streamRenderPending = true;
+      updateStreamMetaOnly();
+      return;
+    }
+
+    const prevOpen = captureOpenSegs(el);
+    const sc = scrollEl();
+    const prevScroll = sc ? sc.scrollTop : 0;
+
     const s = state.stream;
     const meta =
       esc(s.model || '…') +
       ' · ' +
       formatElapsed(Date.now() - (s.startTime || Date.now()));
-    let body = renderTimeline(s.timeline || []);
+    let body = renderTimeline(s.timeline || [], { live: true });
     if (!body && s.fullText) body = '<div class="sc-md">' + renderMarkdown(s.fullText) + '</div>';
     if (!body) body = '<div class="sc-md sc-muted-line">Thinking…</div>';
     el.innerHTML =
@@ -631,8 +725,26 @@
       '</div>' +
       body +
       '</div></div>';
+
+    // Re-apply open state: previous opens + anything not user-closed
+    restoreOpenSegs(el, prevOpen);
+    // Also open keys that were open before and still exist
+    el.querySelectorAll('details[data-seg]').forEach((d) => {
+      const k = d.getAttribute('data-seg');
+      if (k && prevOpen.has(k) && !streamUserClosed.has(k)) {
+        d.setAttribute('open', '');
+      }
+    });
+
     if (s.fullText) lastAssistantMarkdown = s.fullText;
-    maybeScrollToBottom(false);
+    streamRenderPending = false;
+
+    if (stickToBottom) {
+      maybeScrollToBottom(false);
+    } else if (sc) {
+      // Preserve scroll position so content growth doesn't jump selection target
+      sc.scrollTop = prevScroll;
+    }
   }
 
   function renderSessions() {
@@ -819,14 +931,43 @@
 
   window.addEventListener('message', (event) => {
     const msg = event.data || {};
-    if (msg.type === 'state') applyState(msg.payload || {});
-    else if (msg.type === 'stream') {
+    if (msg.type === 'state') {
+      // Clear live stream collapsible prefs when session/messages fully refresh
+      if (!msg.payload || !msg.payload.streaming) streamUserClosed.clear();
+      applyState(msg.payload || {});
+    } else if (msg.type === 'stream') {
       state.streaming = !!(msg.payload && msg.payload.streaming && !msg.payload.done);
       state.stream = msg.payload;
-      if (msg.payload && msg.payload.done) state.streaming = false;
+      if (msg.payload && msg.payload.done) {
+        state.streaming = false;
+        streamUserClosed.clear();
+      }
       renderStream();
       renderStatus();
     } else if (msg.type === 'toast') toast(msg.level, msg.text);
+  });
+
+  // Remember user open/close for live stream details
+  document.addEventListener(
+    'toggle',
+    (e) => {
+      const d = e.target;
+      if (!(d instanceof HTMLDetailsElement)) return;
+      if (!d.closest('#stream')) return;
+      const k = d.getAttribute('data-seg');
+      if (!k) return;
+      if (d.open) streamUserClosed.delete(k);
+      else streamUserClosed.add(k);
+    },
+    true
+  );
+
+  // After selection ends, flush a deferred stream render
+  document.addEventListener('selectionchange', () => {
+    if (!streamRenderPending) return;
+    if (hasSelectionIn($('stream')) || hasSelectionIn(scrollEl())) return;
+    streamRenderPending = false;
+    if (state.streaming) renderStream();
   });
 
   function on(id, evt, fn) {
@@ -1043,6 +1184,31 @@
     true
   );
 
+  function openLink(href) {
+    if (!href) return;
+    const u = String(href).trim();
+    if (!/^(https?:|mailto:)/i.test(u)) return;
+    vscode.postMessage({ type: 'openExternal', url: u });
+  }
+
+  // Capture-phase so links win over other handlers; works during stream
+  document.addEventListener(
+    'click',
+    (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLElement)) return;
+
+      const a = t.closest('a[href]');
+      if (a && (a.hasAttribute('data-ext') || a.classList.contains('sc-link') || /^(https?:|mailto:)/i.test(a.getAttribute('href') || ''))) {
+        e.preventDefault();
+        e.stopPropagation();
+        openLink(a.getAttribute('href'));
+        return;
+      }
+    },
+    true
+  );
+
   document.addEventListener('click', (e) => {
     const t = e.target;
     if (!(t instanceof HTMLElement)) return;
@@ -1074,14 +1240,6 @@
       return;
     }
 
-    if (t.closest('a[data-ext], a.sc-link')) {
-      const a = t.closest('a');
-      if (a && a.getAttribute('href')) {
-        e.preventDefault();
-        vscode.postMessage({ type: 'openExternal', url: a.getAttribute('href') });
-      }
-      return;
-    }
     if (t.matches('button[data-copy]')) {
       const pre = t.closest('.sc-code-block')?.querySelector('code');
       if (pre) {
@@ -1101,8 +1259,9 @@
     }
   });
 
+  // Timer only — never full re-render (that was closing details every second)
   setInterval(() => {
-    if (state.streaming) renderStream();
+    if (state.streaming) updateStreamMetaOnly();
   }, 1000);
 
   vscode.postMessage({ type: 'ready' });
