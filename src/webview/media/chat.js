@@ -832,14 +832,25 @@
 
     const banner = $('loginBanner');
     const auth = state.health && state.health.grok_auth;
+    const loggedIn = !!(auth && auth.ok === true && !auth.expired);
+    // Settings "Login to Grok" only when not authenticated
+    const btnLogin = $('btnLogin');
+    if (btnLogin) {
+      btnLogin.classList.toggle('hidden', loggedIn);
+    }
     if (banner) {
-      if (auth && auth.ok === false) {
+      if (!loggedIn && auth && auth.ok === false) {
         banner.classList.remove('hidden');
         banner.innerHTML =
           'Grok not signed in. <button type="button" id="btnLoginBanner">Login</button>';
         const b = $('btnLoginBanner');
         if (b) b.onclick = () => vscode.postMessage({ type: 'loginGrok' });
-      } else banner.classList.add('hidden');
+      } else if (!loggedIn && !auth) {
+        // health missing / unknown — show login in settings only, no banner spam
+        banner.classList.add('hidden');
+      } else {
+        banner.classList.add('hidden');
+      }
     }
 
     const root = document.getElementById('app');
