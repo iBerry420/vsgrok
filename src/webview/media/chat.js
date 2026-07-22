@@ -31,6 +31,12 @@
   const streamUserClosed = new Set();
   /** Defer stream HTML rebuild while the user is selecting text. */
   let streamRenderPending = false;
+  /**
+   * Pending optimistic user bubble kept *outside* state so host fullState
+   * overwrites cannot hide it until the AI turn ends / host confirms.
+   * { id, role, content, createdAt } | null
+   */
+  let pendingUserBubble = null;
 
   function esc(s) {
     return String(s == null ? '' : s)
@@ -791,11 +797,23 @@
 
   /**
    * Client-side safety net: never render Grok system chrome as the user bubble.
-   * Mirrors host displayUserText for the common bridge / chat_history shapes.
+   * Prefer text after the last *line-start* `[User]:` (bridge format).
    */
   function displayUserContent(raw) {
     let t = String(raw == null ? '' : raw).trim();
     if (!t) return '';
+
+    // Line-anchored marker so mid-line quotes of "[User]:" do not truncate.
+    const re = /(?:^|\n)\[User\]:\s*/gi;
+    let last = null;
+    let m;
+    while ((m = re.exec(t)) !== null) last = m;
+    if (last) {
+      let out = t.slice(last.index + last[0].length).trim();
+      out = out.replace(/<\/user_query>\s*$/i, '').trim();
+      if (out) return out;
+    }
+
     const q = t.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/i);
     if (q) t = (q[1] || '').trim();
     const strip = [
@@ -815,19 +833,54 @@
     }
     t = t.replace(/<system-reminder\b[^>]*>[\s\S]*/gi, '');
     t = t.replace(/<user_info\b[^>]*>[\s\S]*/gi, '');
-    const marks = t.match(/\[User\]:\s*/gi);
-    if (marks) {
-      const idx = t.toLowerCase().lastIndexOf('[user]:');
-      if (idx >= 0) t = t.slice(idx + 7).replace(/^\s*/, '');
-    } else {
-      t = t
-        .replace(
-          /^When you reply, write only your new answer\.\s*Do not repeat prior lines unless asked\.\s*/i,
-          ''
-        )
-        .trim();
-    }
+    t = t
+      .replace(
+        /^When you reply, write only your new answer\.\s*Do not repeat prior lines unless asked\.\s*/i,
+        ''
+      )
+      .trim();
     return t.trim();
+  }
+
+  /** Normalize user messages in a list so system chrome never lives in state. */
+  function sanitizeUserMessages(msgs) {
+    if (!Array.isArray(msgs)) return msgs;
+    return msgs
+      .map((m) => {
+        if (!m || m.role !== 'user') return m;
+        const cleaned = displayUserContent(m.content || '');
+        if (!cleaned) return null;
+        if (cleaned === m.content) return m;
+        return { ...m, content: cleaned };
+      })
+      .filter(Boolean);
+  }
+
+  function messagesForRender() {
+    let msgs = sanitizeUserMessages(state.messages || []) || [];
+    if (pendingUserBubble && pendingUserBubble.content) {
+      const want = pendingUserBubble.content;
+      const has = msgs.some(
+        (m) =>
+          m.role === 'user' &&
+          (sameUserContent(m.content, want) ||
+            sameUserContent(displayUserContent(m.content), want))
+      );
+      if (!has) {
+        msgs = msgs.concat([
+          {
+            id: pendingUserBubble.id,
+            role: 'user',
+            content: pendingUserBubble.content,
+            createdAt: pendingUserBubble.createdAt,
+          },
+        ]);
+      } else {
+        // Host has caught up — drop pending so we don't double up later
+        pendingUserBubble = null;
+      }
+    }
+    return msgs;
   }
 
   function messageHtml(m) {
@@ -866,8 +919,8 @@
   function renderMessages() {
     const root = $('messages');
     if (!root) return;
-    const msgs = state.messages || [];
-    if (!msgs.length && !state.streaming) {
+    const msgs = messagesForRender();
+    if (!msgs.length && !state.streaming && !pendingUserBubble) {
       root.innerHTML =
         '<div class="sc-welcome"><h3>VSGrok Chat</h3><p>Grok Build sessions for this workspace. History comes from <code>~/.grok/sessions</code>.</p></div>';
       return;
@@ -1089,37 +1142,25 @@
 
   function applyState(payload) {
     const wasStreaming = state.streaming;
-    const prevMsgs = state.messages || [];
     let next = payload || {};
-    // Keep optimistic / just-sent user bubbles until the host includes them.
-    // Stale fullState (bridge reconnect, models/health) can otherwise blank
-    // the bubble for the whole AI turn.
+    // Always sanitize user rows so wrapped Grok history never lands in state.
     if (Array.isArray(next.messages)) {
-      const merged = next.messages.slice();
-      const hasUser = (content) =>
-        merged.some((m) => m.role === 'user' && sameUserContent(m.content, content));
-
-      const optimistic = prevMsgs.filter(
-        (m) => m.role === 'user' && String(m.id || '').startsWith('local-')
+      next = { ...next, messages: sanitizeUserMessages(next.messages) };
+    }
+    // Clear pending bubble once host has the same clean user text
+    if (pendingUserBubble && Array.isArray(next.messages)) {
+      const want = pendingUserBubble.content;
+      const has = next.messages.some(
+        (m) =>
+          m.role === 'user' &&
+          (sameUserContent(m.content, want) ||
+            sameUserContent(displayUserContent(m.content), want))
       );
-      for (let i = 0; i < optimistic.length; i++) {
-        const o = optimistic[i];
-        if (!hasUser(o.content)) merged.push(o);
-      }
-
-      // Also retain a trailing real user turn while streaming if host is behind.
-      // Skip empty streaming assistant stubs at the tail first.
-      if (next.streaming || state.streaming) {
-        for (let i = prevMsgs.length - 1; i >= 0; i--) {
-          const p = prevMsgs[i];
-          if (!p) continue;
-          if (p.role === 'assistant' && p.metadata && p.metadata.streaming) continue;
-          if (p.role !== 'user') break;
-          if (!hasUser(p.content)) merged.push(p);
-          break;
-        }
-      }
-      next = { ...next, messages: merged };
+      if (has) pendingUserBubble = null;
+    }
+    // Host finished streaming without ever confirming — keep pending until next send
+    if (next.streaming === false && wasStreaming && pendingUserBubble) {
+      // leave pending; renderMessages will still show it
     }
     // Host null stream while not streaming must clear residual previous bubble.
     if (next.stream === null || next.stream === undefined) {
@@ -1285,16 +1326,25 @@
     if (!text.trim() || state.streaming) return;
     const model = ($('modelSelect') && $('modelSelect').value) || state.selectedModel;
 
-    // Optimistic user bubble — only the bare user text, never system chrome.
-    // Must paint before postMessage so the bubble is visible for the whole AI turn.
+    // Pending user bubble lives outside `state` so host fullState cannot wipe it.
+    // Paint before postMessage so it is visible for the whole AI turn.
     const userText = text.trim();
-    const optimistic = {
+    pendingUserBubble = {
       id: 'local-' + Date.now(),
       role: 'user',
       content: userText,
       createdAt: Date.now(),
     };
-    state.messages = [...(state.messages || []), optimistic];
+    // Also put into messages for setState / host merge, but pending is source of truth.
+    state.messages = [
+      ...(state.messages || []).filter((m) => !(m && String(m.id || '').startsWith('local-'))),
+      {
+        id: pendingUserBubble.id,
+        role: 'user',
+        content: userText,
+        createdAt: pendingUserBubble.createdAt,
+      },
+    ];
     // Clear prior stream shell immediately so previous tools/thoughts never
     // reappear in the live bubble while waiting for the host.
     state.streaming = true;

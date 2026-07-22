@@ -113,9 +113,9 @@ npm run build
 npx @vscode/vsce package --no-dependencies
 
 # Install (use the versioned filename that was produced)
-code --install-extension ./vsgrok-0.1.15.vsix --force
+code --install-extension ./vsgrok-0.1.16.vsix --force
 # or Cursor:
-cursor --install-extension ./vsgrok-0.1.15.vsix --force
+cursor --install-extension ./vsgrok-0.1.16.vsix --force
 ```
 
 Snap VS Code tip: use an absolute path to the `.vsix` if relative install fails.
@@ -284,31 +284,27 @@ Logs: **View → Output → VSGrok**. Bridge also writes under `workspace/.stora
 
 ## Changelog
 
+### 0.1.16
+
+- **Install note:** reloading the window is not enough if the VSIX was never reinstalled — run `./scripts/install-local.sh` then **Developer: Reload Window**
+- **User bubble always visible on send** — pending bubble lives outside webview `state` so host `fullState` cannot wipe it during the AI turn
+- **Display only text after line-start `[User]:`** — matches bridge format; mid-line quotes of `"[User]: "` no longer truncate or leave system chrome
+- Sanitize user rows on every state apply so wrapped Grok history never sticks in the UI
+
 ### 0.1.15
 
 **Chat UX & durability**
 
-- **Instant user bubbles** — message paints as soon as you send (optimistic webview + host transcript push), not only after the assistant finishes
-- **Clean user text** — bubbles show only what you typed; Grok system chrome (`user_info`, skills, notes wrappers, synthetic reminders) is stripped for display
-- **Local transcript mirror** — turns persist in extension storage and merge with `~/.grok/sessions` so reloads mid-stream keep history
-- **Stream isolation** — epoch + session filters drop stale bridge events; `no_agent` reconnect races no longer kill a fresh turn
-- **Mid-stream resume** — incomplete assistant shells reattach after IDE reload when the bridge agent is still alive
-- **Safer session load** — never clobber in-memory messages while streaming; atomic JSON writes for local session files
-
-**Webview**
-
-- Optimistic send path hardened against stale `fullState` overwrites
-- Client-side user-content sanitizer as a safety net for wrapped history
-- Stream shell cleared on new send so prior tools/thoughts do not flash in the live bubble
-
-**Tests**
-
-- `displayUserText` extraction / filtering
-- `mergeTranscripts` (Grok disk + local mirror)
+- Instant user bubbles (optimistic + host transcript push)
+- Clean user text (strip Grok system chrome for display)
+- Local transcript mirror + merge with `~/.grok/sessions`
+- Stream isolation (epoch / session filters)
+- Mid-stream resume after IDE reload
+- Atomic local session writes; unit tests for `displayUserText` / `mergeTranscripts`
 
 ### 0.1.14 and earlier
 
-- Initial public release, app icon, streaming UX polish (open details, selection, links), hide Login when already authenticated — see git history for details
+- Initial public release, app icon, streaming UX polish, hide Login when authenticated — see git history
 
 ---
 

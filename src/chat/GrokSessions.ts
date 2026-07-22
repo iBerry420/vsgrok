@@ -185,25 +185,33 @@ function extractReasoningText(row: {
 /**
  * Reduce Grok-stored user turns to the human-visible message.
  *
- * chat_history often stores the full bridge prompt, e.g.:
- *   <user_query>
- *   When you reply…
- *   <additional_notes>…</additional_notes>
- *   [User]: actual message
- *   </user_query>
- * plus pure meta rows (<user_info>, <system-reminder>) that should be hidden.
+ * Primary rule (bridge format): text after the last *line-start* `[User]:`.
+ * Line-anchoring avoids false cuts when the user types `"[User]: "` mid-line.
+ * Also drops pure meta rows (user_info, system-reminder, synthetic skills, etc.).
  */
 export function displayUserText(raw: string): string {
   let t = String(raw || '').trim();
   if (!t) return '';
 
-  // Unwrap <user_query> (last closed block if several)
+  // 1) Bridge / agent wrapper: everything after last line-start `[User]:`
+  //    (must run on raw first so we don't lose the real marker).
+  const lineMarks = [...t.matchAll(/(?:^|\n)\[User\]:\s*/gi)];
+  if (lineMarks.length) {
+    const last = lineMarks[lineMarks.length - 1];
+    let out = t.slice(last.index! + last[0].length).trim();
+    out = out.replace(/<\/user_query>\s*$/i, '').trim();
+    // Drop accidental trailing meta tags
+    out = out.replace(/<(system-reminder|user_info|additional_notes)\b[\s\S]*$/i, '').trim();
+    if (out) return out;
+  }
+
+  // 2) Unwrap <user_query> (last closed block if several)
   const queries = [...t.matchAll(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/gi)];
   if (queries.length) {
     t = (queries[queries.length - 1][1] || '').trim();
   }
 
-  // Strip known meta / injection blocks (closed tags)
+  // 3) Strip known meta / injection blocks (closed tags)
   const stripTags = [
     'user_info',
     'system-reminder',
@@ -215,7 +223,6 @@ export function displayUserText(raw: string): string {
     'mcp_servers',
     'rules',
     'user_rules',
-    'agent_skills',
     'git_status',
     'environment_details',
     'attached_files',
@@ -232,15 +239,12 @@ export function displayUserText(raw: string): string {
   t = t.trim();
   if (!t) return '';
 
-  // Bridge format ends with `[User]: <prompt>` — take the last marker
-  const markRe = /\[User\]:\s*/gi;
-  let lastMark: RegExpExecArray | null = null;
-  let m: RegExpExecArray | null;
-  while ((m = markRe.exec(t)) !== null) lastMark = m;
-  if (lastMark) {
-    t = t.slice(lastMark.index + lastMark[0].length).trim();
+  // Retry [User]: after stripping (in case marker was nested oddly)
+  const marks2 = [...t.matchAll(/(?:^|\n)\[User\]:\s*/gi)];
+  if (marks2.length) {
+    const last = marks2[marks2.length - 1];
+    t = t.slice(last.index! + last[0].length).trim();
   } else {
-    // Same preamble without a [User]: marker
     t = t
       .replace(
         /^When you reply, write only your new answer\.\s*Do not repeat prior lines unless asked\.\s*/i,
@@ -249,11 +253,9 @@ export function displayUserText(raw: string): string {
       .trim();
   }
 
-  // Hide pure system / empty leftovers
   if (!t) return '';
   const withoutTags = t.replace(/<[^>]+>/g, '').trim();
   if (!withoutTags) return '';
-  // Rows that are only MCP / skill boilerplate without a real query
   if (
     /^(MCP servers|Do not attempt to use tools|The following skills are available)/i.test(
       withoutTags
@@ -262,8 +264,7 @@ export function displayUserText(raw: string): string {
   ) {
     return '';
   }
-  // Entire payload is still a meta wrapper (no real human text)
-  if (/^<(user_info|system-reminder|rules|agent_skills)\b/i.test(t) && !/\[User\]:/i.test(t)) {
+  if (/^<(user_info|system-reminder|rules|agent_skills)\b/i.test(t)) {
     return '';
   }
 

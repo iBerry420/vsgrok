@@ -16,6 +16,18 @@ When you reply, write only your new answer. Do not repeat prior lines unless ask
     assert.equal(displayUserText(raw), 'hello world');
   });
 
+  it('keeps full message when user quotes [User]: mid-line', () => {
+    const raw = `<user_query>
+When you reply, write only your new answer. Do not repeat prior lines unless asked.
+
+[User]: display text after the "[User]: " since thats where my message is
+</user_query>`;
+    assert.equal(
+      displayUserText(raw),
+      'display text after the "[User]: " since thats where my message is'
+    );
+  });
+
   it('returns plain user_query content', () => {
     assert.equal(
       displayUserText('<user_query>\nlets build a chat extension\n</user_query>'),
