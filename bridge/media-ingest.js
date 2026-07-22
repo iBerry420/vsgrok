@@ -201,8 +201,36 @@ function createMediaIngest({ workspace, log }) {
         if (!agent._mediaIngested) agent._mediaIngested = new Set();
         if (!agent.media) agent.media = [];
         if (!agent._mediaBySource) agent._mediaBySource = new Map();
-        if (!agent._grokUpdateOffset) agent._grokUpdateOffset = 0;
+        if (agent._grokUpdateOffset == null) agent._grokUpdateOffset = 0;
         if (!agent._seenToolCallIds) agent._seenToolCallIds = new Set();
+    }
+
+    /**
+     * Skip historical tool_call rows from prior turns in the same Grok session.
+     * updates.jsonl is append-only for the whole session; each new agent spawn
+     * must start at EOF or turn 2+ replays every earlier tool into the stream.
+     *
+     * Returns true once seeded. If the session dir is not resolved yet, returns
+     * false so the next poll can retry (do not mark seeded on a miss).
+     */
+    function seedUpdatesOffsetToEof(agent) {
+        initAgentMedia(agent);
+        const sess = resolveGrokSessionDir(agent);
+        if (!sess) return false;
+        const updatesPath = path.join(sess, 'updates.jsonl');
+        try {
+            if (fs.existsSync(updatesPath)) {
+                agent._grokUpdateOffset = fs.statSync(updatesPath).size;
+            } else {
+                // File may appear after first tool — stay at 0, but still seeded
+                // so we only read bytes written after this moment.
+                agent._grokUpdateOffset = 0;
+            }
+        } catch {
+            agent._grokUpdateOffset = 0;
+        }
+        agent._grokUpdateOffsetSeeded = true;
+        return true;
     }
 
     function emitMedia(agent, media, sendToClient) {
@@ -523,6 +551,12 @@ function createMediaIngest({ workspace, log }) {
     function pollUpdatesJsonl(agent, sendToClient, processHelpers) {
         const sess = resolveGrokSessionDir(agent);
         if (!sess) return;
+        // First time we can see this session's log: jump to EOF so prior turns
+        // are not re-emitted as tool_start into the current stream.
+        if (!agent._grokUpdateOffsetSeeded) {
+            seedUpdatesOffsetToEof(agent);
+            return;
+        }
         const updatesPath = path.join(sess, 'updates.jsonl');
         if (!fs.existsSync(updatesPath)) return;
         let st;
@@ -692,6 +726,10 @@ function createMediaIngest({ workspace, log }) {
     function startWatcher(agent, sendToClient, processHelpers) {
         initAgentMedia(agent);
         stopWatcher(agent);
+        // Best-effort seed now; pollUpdatesJsonl retries if session dir not ready.
+        if (!agent._grokUpdateOffsetSeeded) {
+            seedUpdatesOffsetToEof(agent);
+        }
         agent._mediaWatchTimer = setInterval(() => {
             try {
                 poll(agent, sendToClient, processHelpers);
