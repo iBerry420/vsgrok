@@ -2,7 +2,7 @@
   "name": "vsgrok",
   "displayName": "VSGrok",
   "description": "Highly capable Grok Build chat in VS Code — local bridge, streaming tools/thinking, workspace context, and apply diffs.",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "publisher": "iberry420",
   "license": "MIT",
   "icon": "media/icon.png",

@@ -113,9 +113,9 @@ npm run build
 npx @vscode/vsce package --no-dependencies
 
 # Install (use the versioned filename that was produced)
-code --install-extension ./vsgrok-0.1.11.vsix --force
+code --install-extension ./vsgrok-0.1.15.vsix --force
 # or Cursor:
-cursor --install-extension ./vsgrok-0.1.11.vsix --force
+cursor --install-extension ./vsgrok-0.1.15.vsix --force
 ```
 
 Snap VS Code tip: use an absolute path to the `.vsix` if relative install fails.
@@ -230,7 +230,7 @@ cd vsgrok
 npm install
 (cd bridge && npm ci)
 npm run build          # extension + copy webview assets
-npm test               # unit tests (stream reducer, fence extract)
+npm test               # unit tests (stream, fences, transcripts, displayUserText)
 npm run watch          # rebuild on change
 ```
 
@@ -279,6 +279,36 @@ Logs: **View → Output → VSGrok**. Bridge also writes under `workspace/.stora
 
 - Streaming bridge protocol, detach runtime, and chat UX patterns adapted from **[GrokifyOS](https://github.com/iBerry420/grokifyos)** (MIT).  
 - Grok Build CLI / billing APIs are products of their respective owners; VSGrok only documents how to use your own accounts.
+
+---
+
+## Changelog
+
+### 0.1.15
+
+**Chat UX & durability**
+
+- **Instant user bubbles** — message paints as soon as you send (optimistic webview + host transcript push), not only after the assistant finishes
+- **Clean user text** — bubbles show only what you typed; Grok system chrome (`user_info`, skills, notes wrappers, synthetic reminders) is stripped for display
+- **Local transcript mirror** — turns persist in extension storage and merge with `~/.grok/sessions` so reloads mid-stream keep history
+- **Stream isolation** — epoch + session filters drop stale bridge events; `no_agent` reconnect races no longer kill a fresh turn
+- **Mid-stream resume** — incomplete assistant shells reattach after IDE reload when the bridge agent is still alive
+- **Safer session load** — never clobber in-memory messages while streaming; atomic JSON writes for local session files
+
+**Webview**
+
+- Optimistic send path hardened against stale `fullState` overwrites
+- Client-side user-content sanitizer as a safety net for wrapped history
+- Stream shell cleared on new send so prior tools/thoughts do not flash in the live bubble
+
+**Tests**
+
+- `displayUserText` extraction / filtering
+- `mergeTranscripts` (Grok disk + local mirror)
+
+### 0.1.14 and earlier
+
+- Initial public release, app icon, streaming UX polish (open details, selection, links), hide Login when already authenticated — see git history for details
 
 ---
 

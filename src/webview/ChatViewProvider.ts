@@ -66,6 +66,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           });
         }
         await this.controller.pushFullState();
+        // Reattach mid-stream turns after IDE reload / webview recreate
+        await this.controller.tryResumeIncompleteStream();
         break;
       case 'startBridge':
         try {

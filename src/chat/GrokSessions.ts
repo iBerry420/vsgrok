@@ -182,14 +182,92 @@ function extractReasoningText(row: {
   return '';
 }
 
-function stripUserQuery(text: string): string {
-  const m = text.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/i);
-  if (m) return m[1].trim();
-  // drop heavy system wrappers for display
-  if (text.includes('<user_info>') || text.includes('<system-reminder>')) {
+/**
+ * Reduce Grok-stored user turns to the human-visible message.
+ *
+ * chat_history often stores the full bridge prompt, e.g.:
+ *   <user_query>
+ *   When you reply…
+ *   <additional_notes>…</additional_notes>
+ *   [User]: actual message
+ *   </user_query>
+ * plus pure meta rows (<user_info>, <system-reminder>) that should be hidden.
+ */
+export function displayUserText(raw: string): string {
+  let t = String(raw || '').trim();
+  if (!t) return '';
+
+  // Unwrap <user_query> (last closed block if several)
+  const queries = [...t.matchAll(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/gi)];
+  if (queries.length) {
+    t = (queries[queries.length - 1][1] || '').trim();
+  }
+
+  // Strip known meta / injection blocks (closed tags)
+  const stripTags = [
+    'user_info',
+    'system-reminder',
+    'additional_notes',
+    'conversation_history',
+    'agent_skills',
+    'available_skills',
+    'open_and_recently_viewed_files',
+    'mcp_servers',
+    'rules',
+    'user_rules',
+    'agent_skills',
+    'git_status',
+    'environment_details',
+    'attached_files',
+  ];
+  for (const tag of stripTags) {
+    t = t.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi'), '');
+  }
+  // Unclosed meta payloads (entire remainder is system noise)
+  t = t.replace(/<system-reminder\b[^>]*>[\s\S]*/gi, '');
+  t = t.replace(/<user_info\b[^>]*>[\s\S]*/gi, '');
+  t = t.replace(/<rules\b[^>]*>[\s\S]*/gi, '');
+  t = t.replace(/<agent_skills\b[^>]*>[\s\S]*/gi, '');
+
+  t = t.trim();
+  if (!t) return '';
+
+  // Bridge format ends with `[User]: <prompt>` — take the last marker
+  const markRe = /\[User\]:\s*/gi;
+  let lastMark: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = markRe.exec(t)) !== null) lastMark = m;
+  if (lastMark) {
+    t = t.slice(lastMark.index + lastMark[0].length).trim();
+  } else {
+    // Same preamble without a [User]: marker
+    t = t
+      .replace(
+        /^When you reply, write only your new answer\.\s*Do not repeat prior lines unless asked\.\s*/i,
+        ''
+      )
+      .trim();
+  }
+
+  // Hide pure system / empty leftovers
+  if (!t) return '';
+  const withoutTags = t.replace(/<[^>]+>/g, '').trim();
+  if (!withoutTags) return '';
+  // Rows that are only MCP / skill boilerplate without a real query
+  if (
+    /^(MCP servers|Do not attempt to use tools|The following skills are available)/i.test(
+      withoutTags
+    ) &&
+    withoutTags.length < 800
+  ) {
     return '';
   }
-  return text.trim();
+  // Entire payload is still a meta wrapper (no real human text)
+  if (/^<(user_info|system-reminder|rules|agent_skills)\b/i.test(t) && !/\[User\]:/i.test(t)) {
+    return '';
+  }
+
+  return t.trim();
 }
 
 /**
@@ -228,8 +306,10 @@ export function loadGrokMessages(sessionId: string, dir?: string): ChatMessage[]
     if (type === 'user') {
       openAssistant = null;
       pendingThinking = [];
+      // Synthetic system rows (skills list, MCP status) are not human turns
+      if (row.synthetic_reason) continue;
       const raw = extractText(row.content);
-      const text = stripUserQuery(raw);
+      const text = displayUserText(raw);
       if (!text) continue;
       const idx = messages.length;
       messages.push({

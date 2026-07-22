@@ -192,27 +192,156 @@
     return t;
   }
 
+  /** Split a GFM table row into cells (leading/trailing pipes optional). */
+  function splitTableRow(line) {
+    let t = String(line).trim();
+    if (t.startsWith('|')) t = t.slice(1);
+    if (t.endsWith('|')) t = t.slice(0, -1);
+    return t.split('|').map((c) => c.trim());
+  }
+
+  /** True if line is a GFM table separator, e.g. | --- | :---: | ---: | */
+  function isTableSeparator(line) {
+    const trim = String(line || '').trim();
+    if (!trim.includes('-') || !trim.includes('|')) return false;
+    const cells = splitTableRow(trim);
+    if (!cells.length) return false;
+    return cells.every((c) => /^:?-{1,}:?$/.test(c));
+  }
+
+  /** Header + separator at lines[i] / lines[i+1] start a GFM table. */
+  function isTableStart(lines, i) {
+    if (i + 1 >= lines.length) return false;
+    const head = (lines[i] || '').trim();
+    if (!head.includes('|')) return false;
+    if (/^\u0000BLOCK\d+\u0000$/.test(head)) return false;
+    return isTableSeparator(lines[i + 1]);
+  }
+
+  function tableAlignFromSep(sepCells) {
+    return sepCells.map((c) => {
+      const s = c.trim();
+      const left = s.startsWith(':');
+      const right = s.endsWith(':');
+      if (left && right) return 'center';
+      if (right) return 'right';
+      if (left) return 'left';
+      return '';
+    });
+  }
+
+  function renderTableCell(tag, text, align) {
+    const style = align ? ' style="text-align:' + align + '"' : '';
+    return '<' + tag + style + '>' + inlineFormat(text) + '</' + tag + '>';
+  }
+
+  function renderMarkdownTable(headerCells, aligns, bodyRows) {
+    const colCount = Math.max(
+      headerCells.length,
+      aligns.length,
+      ...bodyRows.map((r) => r.length),
+      0
+    );
+    const pad = (cells) => {
+      const out = cells.slice(0, colCount);
+      while (out.length < colCount) out.push('');
+      return out;
+    };
+    const head = pad(headerCells);
+    const al = pad(aligns);
+    let html =
+      '<div class="sc-table-wrap"><table class="sc-table"><thead><tr>' +
+      head.map((c, j) => renderTableCell('th', c, al[j])).join('') +
+      '</tr></thead><tbody>';
+    for (let r = 0; r < bodyRows.length; r++) {
+      const row = pad(bodyRows[r]);
+      html +=
+        '<tr>' + row.map((c, j) => renderTableCell('td', c, al[j])).join('') + '</tr>';
+    }
+    html += '</tbody></table></div>';
+    return html;
+  }
+
   /**
-   * Lightweight markdown: fences, headings, lists, quotes, hr, paragraphs, links.
+   * Extract fenced code blocks (``` / ~~~), including unclosed fences while streaming.
+   * Replaces each fence with a \u0000BLOCKn\u0000 token and pushes HTML into blocks.
+   */
+  function extractCodeFences(text, blocks) {
+    let result = '';
+    let i = 0;
+    const s = String(text);
+    while (i < s.length) {
+      const tick = s.indexOf('```', i);
+      const wave = s.indexOf('~~~', i);
+      let open = -1;
+      let marker = '```';
+      if (tick === -1 && wave === -1) {
+        result += s.slice(i);
+        break;
+      }
+      if (tick === -1 || (wave !== -1 && wave < tick)) {
+        open = wave;
+        marker = '~~~';
+      } else {
+        open = tick;
+        marker = '```';
+      }
+      result += s.slice(i, open);
+      const afterOpen = open + marker.length;
+      const nl = s.indexOf('\n', afterOpen);
+      let info;
+      let bodyStart;
+      if (nl === -1) {
+        // Opening fence at EOF (still streaming info line)
+        info = s.slice(afterOpen).replace(/\r$/, '');
+        if (info.includes(marker[0]) && marker === '```') {
+          // Not a real fence (e.g. inline ```)
+          result += s.slice(open, afterOpen);
+          i = afterOpen;
+          continue;
+        }
+        const bi = blocks.length;
+        blocks.push(renderCodeFence(info, ''));
+        result += '\n\n\u0000BLOCK' + bi + '\u0000\n\n';
+        break;
+      }
+      info = s.slice(afterOpen, nl);
+      // Info line must not contain the fence marker char mid-token for ```
+      if (marker === '```' && /`/.test(info)) {
+        result += s.slice(open, afterOpen);
+        i = afterOpen;
+        continue;
+      }
+      bodyStart = nl + 1;
+      const close = s.indexOf(marker, bodyStart);
+      if (close === -1) {
+        // Unclosed fence — rest of text is code (live thoughts/stream)
+        const body = s.slice(bodyStart);
+        const bi = blocks.length;
+        blocks.push(renderCodeFence(info, body));
+        result += '\n\n\u0000BLOCK' + bi + '\u0000\n\n';
+        break;
+      }
+      const body = s.slice(bodyStart, close);
+      const bi = blocks.length;
+      blocks.push(renderCodeFence(info, body));
+      result += '\n\n\u0000BLOCK' + bi + '\u0000\n\n';
+      i = close + marker.length;
+      if (s[i] === '\r') i++;
+      if (s[i] === '\n') i++;
+    }
+    return result;
+  }
+
+  /**
+   * Lightweight markdown: fences, headings, lists, tables, quotes, hr, paragraphs, links.
    * Used for assistant text and thinking blocks.
    */
   function renderMarkdown(src) {
     if (!src) return '';
     let text = String(src).replace(/\r\n/g, '\n');
     const blocks = [];
-    // fenced code
-    text = text.replace(/```([^\n`]*)\n([\s\S]*?)```/g, (_, info, body) => {
-      const i = blocks.length;
-      blocks.push(renderCodeFence(info, body));
-      return '\n\n\u0000BLOCK' + i + '\u0000\n\n';
-    });
-    // also ```inline fence without trailing newline edge case
-    text = text.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (m, info, body) => {
-      if (m.includes('\u0000BLOCK')) return m;
-      const i = blocks.length;
-      blocks.push(renderCodeFence(info, body));
-      return '\n\n\u0000BLOCK' + i + '\u0000\n\n';
-    });
+    text = extractCodeFences(text, blocks);
 
     const lines = text.split('\n');
     const out = [];
@@ -247,6 +376,27 @@
       if (/^(-{3,}|\*{3,}|_{3,})$/.test(trim)) {
         out.push('<hr class="sc-hr"/>');
         i++;
+        continue;
+      }
+
+      // GFM table: header | sep | body rows
+      if (isTableStart(lines, i)) {
+        const headerCells = splitTableRow(lines[i]);
+        const aligns = tableAlignFromSep(splitTableRow(lines[i + 1]));
+        i += 2;
+        const bodyRows = [];
+        while (i < lines.length) {
+          const rowTrim = (lines[i] || '').trim();
+          if (!rowTrim) break;
+          if (!rowTrim.includes('|')) break;
+          if (/^\u0000BLOCK\d+\u0000$/.test(rowTrim)) break;
+          if (/^(#{1,6})\s+/.test(rowTrim)) break;
+          if (/^(-{3,}|\*{3,}|_{3,})$/.test(rowTrim)) break;
+          if (isTableSeparator(rowTrim)) break;
+          bodyRows.push(splitTableRow(lines[i]));
+          i++;
+        }
+        out.push(renderMarkdownTable(headerCells, aligns, bodyRows));
         continue;
       }
 
@@ -305,7 +455,8 @@
           /^[-*+]\s+/.test(t) ||
           /^\d+[.)]\s+/.test(t) ||
           /^>\s?/.test(t) ||
-          /^(-{3,}|\*{3,}|_{3,})$/.test(t)
+          /^(-{3,}|\*{3,}|_{3,})$/.test(t) ||
+          isTableStart(lines, i)
         ) {
           break;
         }
@@ -638,6 +789,47 @@
     );
   }
 
+  /**
+   * Client-side safety net: never render Grok system chrome as the user bubble.
+   * Mirrors host displayUserText for the common bridge / chat_history shapes.
+   */
+  function displayUserContent(raw) {
+    let t = String(raw == null ? '' : raw).trim();
+    if (!t) return '';
+    const q = t.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/i);
+    if (q) t = (q[1] || '').trim();
+    const strip = [
+      'user_info',
+      'system-reminder',
+      'additional_notes',
+      'conversation_history',
+      'agent_skills',
+      'available_skills',
+      'rules',
+      'user_rules',
+      'git_status',
+    ];
+    for (let i = 0; i < strip.length; i++) {
+      const tag = strip[i];
+      t = t.replace(new RegExp('<' + tag + '\\b[^>]*>[\\s\\S]*?<\\/' + tag + '>', 'gi'), '');
+    }
+    t = t.replace(/<system-reminder\b[^>]*>[\s\S]*/gi, '');
+    t = t.replace(/<user_info\b[^>]*>[\s\S]*/gi, '');
+    const marks = t.match(/\[User\]:\s*/gi);
+    if (marks) {
+      const idx = t.toLowerCase().lastIndexOf('[user]:');
+      if (idx >= 0) t = t.slice(idx + 7).replace(/^\s*/, '');
+    } else {
+      t = t
+        .replace(
+          /^When you reply, write only your new answer\.\s*Do not repeat prior lines unless asked\.\s*/i,
+          ''
+        )
+        .trim();
+    }
+    return t.trim();
+  }
+
   function messageHtml(m) {
     const meta = m.metadata || {};
     const excluded = !!m.excludedFromContext;
@@ -651,7 +843,8 @@
     } else if (m.role === 'assistant') {
       body = '<div class="sc-md">' + renderMarkdown(m.content || '') + '</div>';
     } else {
-      body = '<div class="sc-md">' + renderMarkdown(m.content || '') + '</div>';
+      const userText = displayUserContent(m.content || '');
+      body = '<div class="sc-md">' + renderMarkdown(userText) + '</div>';
     }
     if (m.role === 'assistant' && m.content) lastAssistantMarkdown = m.content;
     // Action bar is a sibling of the bubble so it can displace layout (not overlay)
@@ -883,9 +1076,67 @@
     if (ctx) ctx.classList.toggle('active', contextOn);
   }
 
+  function sameUserContent(a, b) {
+    return (
+      String(a || '')
+        .replace(/\s+/g, ' ')
+        .trim() ===
+      String(b || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+    );
+  }
+
   function applyState(payload) {
     const wasStreaming = state.streaming;
-    state = { ...state, ...payload };
+    const prevMsgs = state.messages || [];
+    let next = payload || {};
+    // Keep optimistic / just-sent user bubbles until the host includes them.
+    // Stale fullState (bridge reconnect, models/health) can otherwise blank
+    // the bubble for the whole AI turn.
+    if (Array.isArray(next.messages)) {
+      const merged = next.messages.slice();
+      const hasUser = (content) =>
+        merged.some((m) => m.role === 'user' && sameUserContent(m.content, content));
+
+      const optimistic = prevMsgs.filter(
+        (m) => m.role === 'user' && String(m.id || '').startsWith('local-')
+      );
+      for (let i = 0; i < optimistic.length; i++) {
+        const o = optimistic[i];
+        if (!hasUser(o.content)) merged.push(o);
+      }
+
+      // Also retain a trailing real user turn while streaming if host is behind.
+      // Skip empty streaming assistant stubs at the tail first.
+      if (next.streaming || state.streaming) {
+        for (let i = prevMsgs.length - 1; i >= 0; i--) {
+          const p = prevMsgs[i];
+          if (!p) continue;
+          if (p.role === 'assistant' && p.metadata && p.metadata.streaming) continue;
+          if (p.role !== 'user') break;
+          if (!hasUser(p.content)) merged.push(p);
+          break;
+        }
+      }
+      next = { ...next, messages: merged };
+    }
+    // Host null stream while not streaming must clear residual previous bubble.
+    if (next.stream === null || next.stream === undefined) {
+      if (!next.streaming) next = { ...next, stream: null };
+    }
+    state = { ...state, ...next };
+    // Persist transcript in webview state so panel reloads keep messages
+    // even if a host push is delayed (IDE webview recreate).
+    try {
+      vscode.setState({
+        sessionId: state.sessionId,
+        messages: state.messages,
+        sessionTitle: state.sessionTitle,
+      });
+    } catch {
+      /* ignore */
+    }
     renderSessions();
     renderModels();
     renderNotes();
@@ -947,11 +1198,32 @@
       if (!msg.payload || !msg.payload.streaming) streamUserClosed.clear();
       applyState(msg.payload || {});
     } else if (msg.type === 'stream') {
-      state.streaming = !!(msg.payload && msg.payload.streaming && !msg.payload.done);
-      state.stream = msg.payload;
-      if (msg.payload && msg.payload.done) {
+      const payload = msg.payload || null;
+      // Ignore empty residual payloads that would re-show an old timeline
+      // after we already cleared for a new send.
+      if (
+        payload &&
+        payload.streaming &&
+        state.streaming &&
+        state.stream &&
+        !state.stream.timeline?.length &&
+        !state.stream.fullText &&
+        payload.timeline?.length &&
+        payload.startTime &&
+        state.stream.startTime &&
+        payload.startTime < state.stream.startTime - 500
+      ) {
+        // Stale stream from a previous turn — drop
+        return;
+      }
+      state.streaming = !!(payload && payload.streaming && !payload.done);
+      state.stream = payload;
+      if (payload && payload.done) {
         state.streaming = false;
         streamUserClosed.clear();
+      }
+      if (!payload || (!payload.streaming && payload.done)) {
+        // Keep done payload only briefly; full state will fold into messages
       }
       renderStream();
       renderStatus();
@@ -1013,21 +1285,50 @@
     if (!text.trim() || state.streaming) return;
     const model = ($('modelSelect') && $('modelSelect').value) || state.selectedModel;
 
-    // Optimistic user bubble before host responds
+    // Optimistic user bubble — only the bare user text, never system chrome.
+    // Must paint before postMessage so the bubble is visible for the whole AI turn.
+    const userText = text.trim();
     const optimistic = {
       id: 'local-' + Date.now(),
       role: 'user',
-      content: text.trim(),
+      content: userText,
       createdAt: Date.now(),
     };
     state.messages = [...(state.messages || []), optimistic];
+    // Clear prior stream shell immediately so previous tools/thoughts never
+    // reappear in the live bubble while waiting for the host.
     state.streaming = true;
+    state.stream = {
+      streaming: true,
+      done: false,
+      fullText: '',
+      thinkingSummary: '',
+      toolCount: 0,
+      timeline: [],
+      model: '',
+      startTime: Date.now(),
+      error: null,
+      interrupted: false,
+      duration: 0,
+      messageId: null,
+    };
+    streamUserClosed.clear();
     stickToBottom = true;
+    try {
+      vscode.setState({
+        sessionId: state.sessionId,
+        messages: state.messages,
+        sessionTitle: state.sessionTitle,
+      });
+    } catch {
+      /* ignore */
+    }
     renderMessages();
+    renderStream();
     renderStatus();
     maybeScrollToBottom(true);
 
-    vscode.postMessage({ type: 'send', text, model });
+    vscode.postMessage({ type: 'send', text: userText, model });
     if ($('prompt')) {
       $('prompt').value = '';
       autosizePrompt();
@@ -1274,6 +1575,20 @@
   setInterval(() => {
     if (state.streaming) updateStreamMetaOnly();
   }, 1000);
+
+  // Restore last transcript from webview state while host reloads (IDE reload /
+  // panel recreate). Host state push will replace this with the durable merge.
+  try {
+    const cached = vscode.getState && vscode.getState();
+    if (cached && Array.isArray(cached.messages) && cached.messages.length) {
+      state.messages = cached.messages;
+      if (cached.sessionId) state.sessionId = cached.sessionId;
+      if (cached.sessionTitle) state.sessionTitle = cached.sessionTitle;
+      renderMessages();
+    }
+  } catch {
+    /* ignore */
+  }
 
   vscode.postMessage({ type: 'ready' });
 })();

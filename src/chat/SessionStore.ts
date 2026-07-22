@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as crypto from 'crypto';
 import type { ChatMessage, ChatNote, ChatSession } from './types';
 
-type SessionFile = {
+export type SessionFile = {
   id: string;
   title: string;
   createdAt: number;
@@ -43,7 +43,7 @@ export class SessionStore {
 
   private writeIndex(sessions: ChatSession[]): void {
     fs.mkdirSync(path.dirname(this.indexPath), { recursive: true });
-    fs.writeFileSync(this.indexPath, JSON.stringify(sessions, null, 2));
+    atomicWriteJson(this.indexPath, sessions);
   }
 
   listSessions(): ChatSession[] {
@@ -69,15 +69,25 @@ export class SessionStore {
       messages: [],
     };
     this.writeSession(session);
-    const index = this.readIndex();
-    index.unshift({
+    return session;
+  }
+
+  /**
+   * Ensure a local mirror file exists for a Grok session id (UUID).
+   * Used so we can persist transcript even before Grok writes chat_history.
+   */
+  ensureMirror(id: string, title = 'New Chat'): SessionFile {
+    const existing = this.loadSession(id);
+    if (existing) return existing;
+    const now = Date.now();
+    const session: SessionFile = {
       id,
       title,
       createdAt: now,
       updatedAt: now,
-      messageCount: 0,
-    });
-    this.writeIndex(index);
+      messages: [],
+    };
+    this.writeSession(session);
     return session;
   }
 
@@ -91,7 +101,8 @@ export class SessionStore {
   }
 
   writeSession(session: SessionFile): void {
-    fs.writeFileSync(this.sessionPath(session.id), JSON.stringify(session, null, 2));
+    fs.mkdirSync(this.root, { recursive: true });
+    atomicWriteJson(this.sessionPath(session.id), session);
     const index = this.readIndex();
     const row: ChatSession = {
       id: session.id,
@@ -104,6 +115,28 @@ export class SessionStore {
     if (i >= 0) index[i] = row;
     else index.unshift(row);
     this.writeIndex(index);
+  }
+
+  /**
+   * Persist full transcript for a session (durable across IDE reload / bridge death).
+   */
+  saveMessages(sessionId: string, messages: ChatMessage[], titleHint?: string): void {
+    if (!sessionId) return;
+    const prev = this.loadSession(sessionId);
+    const now = Date.now();
+    let title = prev?.title || 'New Chat';
+    if (titleHint && titleHint.trim()) title = titleHint.slice(0, 255);
+    else if (title === 'New Chat') {
+      const firstUser = messages.find((m) => m.role === 'user' && m.content.trim());
+      if (firstUser) title = autoTitle(firstUser.content);
+    }
+    this.writeSession({
+      id: sessionId,
+      title,
+      createdAt: prev?.createdAt || now,
+      updatedAt: now,
+      messages: messages.map((m) => ({ ...m, metadata: m.metadata ? { ...m.metadata } : undefined })),
+    });
   }
 
   renameSession(id: string, title: string): void {
@@ -124,8 +157,7 @@ export class SessionStore {
   }
 
   appendMessage(sessionId: string, message: ChatMessage): SessionFile | null {
-    const session = this.loadSession(sessionId);
-    if (!session) return null;
+    const session = this.ensureMirror(sessionId);
     session.messages.push(message);
     session.updatedAt = Date.now();
     if (
@@ -161,7 +193,27 @@ export class SessionStore {
 
   saveNotes(notes: ChatNote[]): void {
     fs.mkdirSync(path.dirname(this.notesPath), { recursive: true });
-    fs.writeFileSync(this.notesPath, JSON.stringify(notes, null, 2));
+    atomicWriteJson(this.notesPath, notes);
+  }
+}
+
+/** Atomic-ish JSON write so crashes mid-write don't wipe the prior file. */
+function atomicWriteJson(filePath: string, data: unknown): void {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const body = JSON.stringify(data, null, 2);
+  fs.writeFileSync(tmp, body, 'utf8');
+  try {
+    fs.renameSync(tmp, filePath);
+  } catch {
+    // Windows / cross-device fallback
+    fs.writeFileSync(filePath, body, 'utf8');
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
