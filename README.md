@@ -205,7 +205,7 @@ Auth lives in `~/.grok/auth.json`. VSGrok never uploads credentials; the bridge 
 │                                        │ Local bridge    │  │
 │                                        │ (Node, vendored)│  │
 │                                        │ spawn `grok`    │  │
-│                                        └────────┬───────┘  │
+│                                        └────────┬─-──────┘  │
 │                                                 │           │
 │                                        workspace folder cwd │
 │                                        ~/.grok sessions     │
