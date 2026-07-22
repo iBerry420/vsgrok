@@ -41,6 +41,7 @@ VSGrok is different:
   - User order: delete · hide · copy  
   - AI order: copy · hide · delete
 - **Usage chip** + settings breakdown (weekly Grok Build billing %)
+- **Model + reasoning effort** in Settings: pick model and `low` / `medium` / `high` (`--reasoning-effort` per turn)
 
 ### Sessions
 
@@ -175,7 +176,7 @@ Auth lives in `~/.grok/auth.json`. VSGrok never uploads credentials; the bridge 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `grokBin` | `grok` | Path or name of the Grok Build CLI |
-| `reasoningEffort` | `high` | Passed to `grok --reasoning-effort` |
+| `reasoningEffort` | `high` | `low` / `medium` / `high` — passed to `grok --reasoning-effort` (also in chat Settings) |
 | `defaultModel` | `gb:grok-4.5` | Model id (`gb:…`) |
 | `autoStartBridge` | `true` | Spawn bridge when the extension activates |
 | `bridgePort` | `0` | Listen port (`0` = ephemeral) |

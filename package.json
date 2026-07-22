@@ -2,7 +2,7 @@
   "name": "vsgrok",
   "displayName": "VSGrok",
   "description": "Highly capable Grok Build chat in VS Code — local bridge, streaming tools/thinking, workspace context, and apply diffs.",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "publisher": "iberry420",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -118,7 +118,12 @@
             "medium",
             "high"
           ],
-          "description": "Reasoning effort passed to Grok Build."
+          "enumDescriptions": [
+            "Faster, less deep reasoning",
+            "Balanced reasoning depth",
+            "Maximum reasoning depth (default)"
+          ],
+          "description": "Reasoning effort level passed to Grok Build as --reasoning-effort (low | medium | high)."
         },
         "vsgrok.defaultModel": {
           "type": "string",

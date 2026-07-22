@@ -117,6 +117,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'setModel':
         await this.controller.setModel(String(msg.model || ''));
         break;
+      case 'setReasoningEffort':
+        await this.controller.setReasoningEffort(String(msg.effort || msg.value || ''));
+        break;
       case 'setSetting':
         await this.controller.setSetting(String(msg.key || ''), !!msg.value);
         break;
@@ -228,6 +231,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             </div>
             <label class="sc-settings-label" for="modelSelect">Model</label>
             <select id="modelSelect" class="sc-select"></select>
+            <label class="sc-settings-label" for="effortSelect">Reasoning effort</label>
+            <select id="effortSelect" class="sc-select">
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
 
             <div class="sc-settings-section">CHAT</div>
             <label class="sc-setting-row">

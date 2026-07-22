@@ -10,6 +10,7 @@
     models: [],
     notes: [],
     selectedModel: 'gb:grok-4.5',
+    reasoningEffort: 'high',
     sessionId: null,
     sessionTitle: 'New Chat',
     bridgeConnected: false,
@@ -1033,6 +1034,14 @@
       .join('');
   }
 
+  function renderEffort() {
+    const sel = $('effortSelect');
+    if (!sel) return;
+    const effort = state.reasoningEffort || 'high';
+    const allowed = { low: 1, medium: 1, high: 1 };
+    sel.value = allowed[effort] ? effort : 'high';
+  }
+
   function renderNotes() {
     const list = $('notesList');
     const badge = $('notesBadge');
@@ -1180,6 +1189,7 @@
     }
     renderSessions();
     renderModels();
+    renderEffort();
     renderNotes();
     renderMessages();
     renderStream();
@@ -1443,6 +1453,12 @@
 
   on('modelSelect', 'change', () =>
     vscode.postMessage({ type: 'setModel', model: $('modelSelect').value })
+  );
+  on('effortSelect', 'change', () =>
+    vscode.postMessage({
+      type: 'setReasoningEffort',
+      effort: $('effortSelect').value,
+    })
   );
 
   function bindSetting(id, key, invert) {

@@ -227,6 +227,7 @@ export class ChatController {
       showTools: cfg.get('showTools', true),
       enterToSend: cfg.get('enterToSend', false),
       useHistory: cfg.get('useHistory', true),
+      reasoningEffort: normalizeReasoningEffort(cfg.get('reasoningEffort', 'high')),
       streaming: this.stream.streaming,
       stream: this.stream.streaming ? this.stream : null,
       pinnedPaths: this.pinnedPaths,
@@ -489,6 +490,9 @@ export class ChatController {
 
     const selectedModel =
       model || cfg.get<string>('defaultModel', 'gb:grok-4.5') || 'gb:grok-4.5';
+    const reasoningEffort = normalizeReasoningEffort(
+      cfg.get<string>('reasoningEffort', 'high')
+    );
 
     if (this.streamingMsgId !== assistantId) return;
 
@@ -501,6 +505,7 @@ export class ChatController {
       session_id: sessionId,
       // Always the bare user text — system/notes go via `notes` / Grok session.
       model: selectedModel,
+      reasoning_effort: reasoningEffort,
       history: history && history.length ? history : undefined,
       notes: noteTexts.length ? noteTexts : undefined,
       resume,
@@ -631,6 +636,14 @@ export class ChatController {
     await this.pushFullState();
   }
 
+  async setReasoningEffort(effort: string): Promise<void> {
+    const value = normalizeReasoningEffort(effort);
+    await vscode.workspace
+      .getConfiguration('vsgrok')
+      .update('reasoningEffort', value, vscode.ConfigurationTarget.Global);
+    await this.pushFullState();
+  }
+
   async setSetting(key: string, value: boolean): Promise<void> {
     const map: Record<string, string> = {
       showThinking: 'showThinking',
@@ -737,6 +750,16 @@ export class ChatController {
     if (this.reloadTimer) clearTimeout(this.reloadTimer);
     this.client.disconnect();
   }
+}
+
+const REASONING_EFFORTS = new Set(['low', 'medium', 'high']);
+
+function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' {
+  const v = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (REASONING_EFFORTS.has(v)) return v as 'low' | 'medium' | 'high';
+  return 'high';
 }
 
 function sleep(ms: number): Promise<void> {

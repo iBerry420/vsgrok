@@ -25,8 +25,16 @@ const PORT = parseInt(envFirst('VSGROK_BRIDGE_PORT', 'GROKIFY_BRIDGE_PORT', 'GRO
 const INSTANCE_ID = envFirst('VSGROK_BRIDGE_INSTANCE', 'GROKIFY_BRIDGE_INSTANCE', 'GROKPOT_BRIDGE_INSTANCE') || 'vsgrok';
 const GROK_BIN = envFirst('VSGROK_GROK_BIN', 'GROKIFY_GROK_BIN', 'GROKPOT_GROK_BIN') || 'grok';
 const DEFAULT_GROK_MODEL = envFirst('VSGROK_GROK_DEFAULT_MODEL', 'GROKIFY_GROK_DEFAULT_MODEL', 'GROKPOT_GROK_DEFAULT_MODEL') || 'grok-4.5';
-/** Headless CLI reasoning effort for all chats (override with GROKIFY_REASONING_EFFORT). */
-const REASONING_EFFORT = envFirst('VSGROK_REASONING_EFFORT', 'GROKIFY_REASONING_EFFORT', 'GROKPOT_REASONING_EFFORT') || 'high';
+/** Default headless CLI reasoning effort (override with VSGROK_REASONING_EFFORT / GROKIFY_REASONING_EFFORT). */
+const DEFAULT_REASONING_EFFORT = envFirst('VSGROK_REASONING_EFFORT', 'GROKIFY_REASONING_EFFORT', 'GROKPOT_REASONING_EFFORT') || 'high';
+const ALLOWED_REASONING_EFFORTS = new Set(['low', 'medium', 'high']);
+function resolveReasoningEffort(value) {
+    const v = String(value || '').trim().toLowerCase();
+    if (ALLOWED_REASONING_EFFORTS.has(v)) return v;
+    const fallback = String(DEFAULT_REASONING_EFFORT || 'high').trim().toLowerCase();
+    return ALLOWED_REASONING_EFFORTS.has(fallback) ? fallback : 'high';
+}
+const REASONING_EFFORT = resolveReasoningEffort(DEFAULT_REASONING_EFFORT);
 const LOG_FILE = path.join(WORKSPACE, '.storage', 'logs', 'bridge.log');
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_PROMPT_BYTES = 120000;
@@ -1701,6 +1709,9 @@ function spawnGrokBuild(sessionId, prompt, model, client, history, notes, userId
 
     const resolved = resolveGrokModel(model);
     const realModel = grokRealModel(resolved);
+    const reasoningEffort = resolveReasoningEffort(
+        opts.reasoning_effort != null ? opts.reasoning_effort : opts.reasoningEffort
+    );
     let fullPrompt = buildPromptWithHistory(prompt, history, notes);
     if (Buffer.byteLength(fullPrompt) > MAX_PROMPT_BYTES) {
         fullPrompt = buildPromptWithHistory(prompt, (history || []).slice(-10), notes);
@@ -1709,7 +1720,7 @@ function spawnGrokBuild(sessionId, prompt, model, client, history, notes, userId
     log('info', 'agent', 'Spawning Grok Build', {
         session_id: sessionId,
         model: realModel,
-        reasoning_effort: REASONING_EFFORT,
+        reasoning_effort: reasoningEffort,
         user_id: userId,
         prompt_bytes: Buffer.byteLength(fullPrompt),
         detach: DETACH_AGENTS,
@@ -1719,7 +1730,7 @@ function spawnGrokBuild(sessionId, prompt, model, client, history, notes, userId
     const args = [
         '--output-format', 'streaming-json',
         '--always-approve',
-        '--reasoning-effort', REASONING_EFFORT,
+        '--reasoning-effort', reasoningEffort,
         '-m', realModel,
     ];
     // Resume Grok Build session (UUID) when continuing; otherwise pin session id for new chats
@@ -2078,6 +2089,8 @@ const httpServer = http.createServer((req, res) => {
             grok_models: GROK_MODELS_FULL,
             allowed: [...ALLOWED_MODELS],
             default_model: resolveGrokModel(null),
+            reasoning_efforts: ['low', 'medium', 'high'],
+            default_reasoning_effort: REASONING_EFFORT,
         }));
         return;
     }
@@ -2288,15 +2301,23 @@ wss.on('connection', (ws, req) => {
             return;
         }
 
+        const reasoningEffort = resolveReasoningEffort(
+            data.reasoning_effort != null ? data.reasoning_effort : data.reasoningEffort
+        );
+
         log('info', 'message', 'Prompt received', {
             session_id: sessionId,
             user_id: ws.userId,
             model: resolveGrokModel(model),
+            reasoning_effort: reasoningEffort,
             prompt_len: prompt.length,
         });
 
         const resume = !!(data.resume || data.continue);
-        spawnGrokBuild(sessionId, prompt, model, ws, history, notes, ws.userId, { resume });
+        spawnGrokBuild(sessionId, prompt, model, ws, history, notes, ws.userId, {
+            resume,
+            reasoning_effort: reasoningEffort,
+        });
     });
 
     ws.on('close', () => {

@@ -11,6 +11,7 @@ tsconfig*.json
 # Keep bridge/node_modules so the installed extension can start without a post-install npm.
 # (Only the root extension node_modules is excluded — deps are esbuilt into dist/extension.js.)
 storage/**
+.storage/**
 .vsgrok/**
 *.vsix
 **/.git/**

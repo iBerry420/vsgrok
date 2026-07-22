@@ -12,6 +12,8 @@ export type PromptPayload = {
   prompt: string;
   session_id: string;
   model?: string;
+  /** low | medium | high — passed to grok --reasoning-effort */
+  reasoning_effort?: string;
   history?: HistoryMessage[];
   notes?: string[];
   /** Resume an existing Grok Build session (--resume). */
