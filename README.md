@@ -114,9 +114,9 @@ npm run build
 npx @vscode/vsce package --no-dependencies
 
 # Install (use the versioned filename that was produced)
-code --install-extension ./vsgrok-0.1.16.vsix --force
+code --install-extension ./vsgrok-0.1.18.vsix --force
 # or Cursor:
-cursor --install-extension ./vsgrok-0.1.16.vsix --force
+cursor --install-extension ./vsgrok-0.1.18.vsix --force
 ```
 
 Snap VS Code tip: use an absolute path to the `.vsix` if relative install fails.
@@ -284,6 +284,18 @@ Logs: **View → Output → VSGrok**. Bridge also writes under `workspace/.stora
 ---
 
 ## Changelog
+
+### 0.1.18
+
+- **Fix multi-turn tool replay** — each new agent turn was re-reading Grok’s append-only session `updates.jsonl` from offset 0, so turn 2+ re-emitted every earlier tool into the current stream (prior tools/thoughts mixed with the new turn)
+- Seed the updates poll offset to **EOF** when the session log is first seen; only tools written during the current turn appear
+
+### 0.1.17
+
+- **Reasoning effort picker** in chat Settings (next to Model): `low` / `medium` / `high`
+- Persists as `vsgrok.reasoningEffort` and is sent per turn as `grok --reasoning-effort`
+- Bridge accepts per-prompt `reasoning_effort` (no bridge restart required to change level)
+- Exclude `.storage/` from VSIX packaging (avoid shipping local auth/runtime data)
 
 ### 0.1.16
 
